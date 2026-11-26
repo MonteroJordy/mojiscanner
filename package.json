@@ -1,0 +1,17 @@
+{
+  "name": "door-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One door scanner for tickets sold on Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh and anything else that exports a code.",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server.js",
+    "dev": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning --watch server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js",
+    "test:e2e": "node --disable-warning=ExperimentalWarning test/e2e/run.js"
+  },
+  "license": "UNLICENSED"
+}
