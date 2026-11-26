@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0b0c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Door">
+  <title>Moji Door</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/favicon.png" type="image/png">
+  <link rel="apple-touch-icon" href="/icons/icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400..900&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="door">
+
+  <section id="login" class="door-screen" hidden>
+    <form id="login-form" class="login-body" autocomplete="off">
+      <div class="login-brand"><img class="logo" src="/brand/moji-logo.png" alt="Moji"><span class="label">Door</span></div>
+      <h1 class="login-title">Sign in to the door</h1>
+      <div class="login-group">
+        <div class="label">Event</div>
+        <div id="login-events" class="login-group" role="radiogroup" aria-label="Event"></div>
+      </div>
+      <div class="login-group">
+        <label class="label" for="login-pin">Door PIN</label>
+        <div class="pin-wrap">
+          <div class="pin-boxes" id="pin-boxes" aria-hidden="true"></div>
+          <input id="login-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="12" autocomplete="off" required>
+        </div>
+      </div>
+      <div class="login-group">
+        <label class="label" for="login-device">Device name</label>
+        <input id="login-device" maxlength="40" placeholder="Door 1" autocomplete="off" required>
+        <div class="chips" id="device-chips"></div>
+      </div>
+      <div class="grow-space"></div>
+      <p id="login-error" class="error" role="alert"></p>
+      <button class="primary btn-xl" type="submit" id="login-btn">Start scanning</button>
+      <p class="login-foot">Add this page to your home screen for full-screen scanning.</p>
+    </form>
+  </section>
+
+  <section id="scan" class="door-screen" hidden>
+    <video id="video" playsinline muted autoplay></video>
+    <div class="scan-ui">
+      <div class="scan-card" id="scan-card">
+        <div class="row1">
+          <div class="event" id="event-name"></div>
+          <div class="net" id="net"><span class="ind"></span><span class="label" id="sync-text">Starting</span></div>
+        </div>
+        <div class="row2">
+          <div class="counts"><span class="in"><span id="count-in">0</span> in</span><span class="of"> / <span id="count-total">0</span></span></div>
+          <div class="label" id="device-name"></div>
+        </div>
+      </div>
+      <div class="test-banner" id="test-banner" hidden><b>TEST MODE</b><span>Nobody is let in</span></div>
+      <div class="scan-center">
+        <div class="frame" id="frame"><i></i><i></i><i></i><i></i></div>
+        <div class="pill" id="scan-hint">Hold the QR inside the frame</div>
+        <div class="pill" id="camera-msg" hidden></div>
+        <div class="scanner-mode" id="scanner-mode" hidden>
+          <h2>Scanner mode</h2>
+          <p>The camera is off. Scan with a handheld scanner, or type a code.</p>
+        </div>
+      </div>
+      <div class="round-btns" id="round-btns">
+        <button id="btn-torch" class="round" type="button" hidden>Light</button>
+        <span></span>
+        <button id="btn-camera" class="round" type="button">Flip</button>
+      </div>
+      <div class="big-btns" id="big-btns">
+        <button id="btn-search" class="big" type="button">Search</button>
+        <button id="btn-manual" class="big" type="button">Type code</button>
+        <button id="btn-menu" class="big" type="button">More</button>
+      </div>
+      <div class="test-sheet" id="test-sheet" hidden>
+        <div class="label sm">QR contains</div>
+        <div class="qr-raw" id="t-raw"></div>
+        <div id="t-rows"></div>
+        <div class="two-btns">
+          <button type="button" class="primary" id="t-again">Scan another</button>
+          <button type="button" id="t-exit">Exit test</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="result" class="result" hidden role="alert" aria-live="assertive">
+    <div class="r-top"><span class="r-offline" id="r-offline" hidden>OFFLINE</span><span class="r-where" id="r-where"></span></div>
+    <div class="r-main">
+      <div class="r-glyph" id="r-glyph" aria-hidden="true"></div>
+      <div class="r-word" id="r-verdict"></div>
+      <div class="r-rule"></div>
+      <div class="r-name" id="r-who"></div>
+      <div class="r-line1" id="r-detail"></div>
+      <div class="r-line2" id="r-what"></div>
+      <div class="r-badge-row" id="r-badge-row"><span class="badge r-badge" id="r-platform"></span></div>
+      <button type="button" class="r-action" id="r-search" hidden>Search by name</button>
+    </div>
+    <div class="r-bottom">
+      <div class="r-tap">Tap anywhere to scan next</div>
+      <div class="r-count"><span class="label" id="r-closes"></span><div class="r-track"><div class="r-fill" id="r-fill"></div></div></div>
+    </div>
+  </div>
+
+  <section id="search" class="door-screen page" hidden>
+    <div class="page-top"><button type="button" class="back" id="search-close">← Scan</button><span class="label" id="search-counts"></span></div>
+    <div class="searchbox">
+      <input id="search-input" type="text" placeholder="Name or email" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Search guests">
+      <button type="button" class="clear" id="search-clear" aria-label="Clear search">✕</button>
+    </div>
+    <div class="count-line"><span class="label sm" id="search-count"></span></div>
+    <div class="page-body">
+      <ul id="search-results" class="guests"></ul>
+      <p id="search-empty" class="empty" hidden>No guests match. Check the spelling, or try their email.</p>
+    </div>
+  </section>
+
+  <section id="manual" class="door-screen page" hidden>
+    <div class="page-top"><button type="button" class="back" id="manual-close">← Scan</button></div>
+    <div class="page-body">
+      <form id="manual-form" class="code-page" autocomplete="off">
+        <h1 class="page-title">Type code</h1>
+        <input id="manual-input" autocapitalize="characters" autocorrect="off" spellcheck="false" enterkeyhint="go" aria-label="Ticket code">
+        <p class="hint">The number under the QR, or in the ticket email. Works for every platform.</p>
+        <button class="primary btn-xl" type="submit">Check code</button>
+        <div id="manual-recent" class="recent-codes"></div>
+      </form>
+    </div>
+  </section>
+
+  <section id="menu" class="door-screen page" hidden>
+    <div class="page-top"><button type="button" class="back" id="menu-close">← Scan</button><span class="label" id="menu-device"></span></div>
+    <div class="page-body">
+      <div class="more-page">
+        <div class="label sm">Last scans</div>
+        <div id="recent" class="scans"></div>
+        <p id="recent-empty" class="empty">Nothing scanned on this phone yet.</p>
+        <div class="sync-card">
+          <div class="grow"><div class="t" id="sync-title">Not synced yet</div><div class="s" id="data-status"></div></div>
+          <button type="button" class="primary" id="btn-sync-now">Sync now</button>
+        </div>
+        <div class="label sm">Settings</div>
+        <div>
+          <label class="toggle-row"><input type="checkbox" id="set-sound"><div class="grow"><div class="t">Sounds</div><div class="s">Beep on every result</div></div><div class="switch"><span></span></div></label>
+          <label class="toggle-row"><input type="checkbox" id="set-test"><div class="grow"><div class="t">Test mode</div><div class="s">Check codes without admitting</div></div><div class="switch"><span></span></div></label>
+          <label class="toggle-row"><input type="checkbox" id="set-nocamera"><div class="grow"><div class="t">Handheld scanner</div><div class="s">Use a Bluetooth scanner, not the camera</div></div><div class="switch"><span></span></div></label>
+        </div>
+        <div class="grow-space"></div>
+        <button type="button" class="signout" id="btn-logout">Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <script src="/js/codes.js"></script>
+  <script src="/js/scanner.js"></script>
+  <script src="/js/door.js"></script>
+</body>
+</html>
