@@ -51,7 +51,8 @@
       <div class="setup-b">
         <div class="d-label">This phone is</div>
         <div class="door-grid" id="door-grid" role="radiogroup" aria-label="This phone is"></div>
-        <p class="d-note">Shown on every scan so you know which door let someone in.</p>
+        <input type="text" class="own-name" id="own-name" maxlength="40" autocomplete="off" autocorrect="off" autocapitalize="words" spellcheck="false" enterkeyhint="done" placeholder="Or type a name" aria-label="Or type a name for this phone">
+        <p class="d-note">Shown on every scan, so you can tell which phone let someone in.</p>
         <div class="grow-space"></div>
         <p class="d-error" id="setup-error" role="alert"></p>
         <button type="button" class="d-cta" id="start-btn">Start scanning</button>
