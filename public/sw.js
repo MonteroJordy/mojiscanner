@@ -1,5 +1,5 @@
 /* Keeps the door app opening with no signal. The guest list itself lives in IndexedDB. */
-var CACHE = 'door-shell-v3';
+var CACHE = 'door-shell-v4';
 var FONTS = 'door-fonts-v1';
 var SHELL = ['/', '/css/app.css', '/js/codes.js', '/js/scanner.js', '/js/door.js', '/js/qr-worker.js', '/js/qr-decoder.js', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/favicon.png', '/brand/moji-logo.png', '/fonts/ArchivoBlack-Regular.ttf'];

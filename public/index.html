@@ -22,11 +22,13 @@
   <!-- 01 Door PIN: once a night -->
   <section id="pin" class="door-screen" hidden>
     <div class="d-col pin-col">
-      <img class="logo pin-logo" src="/brand/moji-logo.png" alt="Moji">
-      <h1 class="d-title" id="pin-title">Enter tonight’s<br>door PIN</h1>
-      <p class="d-sub" id="pin-sub">The promoter has it on the event page.</p>
-      <div class="pin-boxes" id="pin-boxes" aria-hidden="true"></div>
-      <p class="d-error" id="pin-error" role="alert" aria-live="assertive"></p>
+      <div class="pin-a">
+        <img class="logo pin-logo" src="/brand/moji-logo.png" alt="Moji">
+        <h1 class="d-title" id="pin-title">Enter tonight’s<br>door PIN</h1>
+        <p class="d-sub" id="pin-sub">The promoter has it on the event page.</p>
+        <div class="pin-boxes" id="pin-boxes" aria-hidden="true"></div>
+        <p class="d-error" id="pin-error" role="alert" aria-live="assertive"></p>
+      </div>
       <div class="grow-space"></div>
       <div class="keypad" id="keypad" role="group" aria-label="Door PIN keypad">
         <button type="button" data-key="1">1</button><button type="button" data-key="2">2</button><button type="button" data-key="3">3</button>
@@ -41,15 +43,19 @@
   <section id="setup" class="door-screen" hidden>
     <div class="d-col setup-col">
       <h1 class="d-title setup-title">Ready to scan</h1>
-      <div class="d-label" id="setup-when">Tonight</div>
-      <div id="setup-events" class="setup-events" role="radiogroup" aria-label="Event"></div>
-      <button type="button" class="link-row" id="pick-another">Wrong event? Pick another</button>
-      <div class="d-label">This phone is</div>
-      <div class="door-grid" id="door-grid" role="radiogroup" aria-label="This phone is"></div>
-      <p class="d-note">Shown on every scan so you know which door let someone in.</p>
-      <div class="grow-space"></div>
-      <p class="d-error" id="setup-error" role="alert"></p>
-      <button type="button" class="d-cta" id="start-btn">Start scanning</button>
+      <div class="setup-a">
+        <div class="d-label" id="setup-when">Tonight</div>
+        <div id="setup-events" class="setup-events" role="radiogroup" aria-label="Event"></div>
+        <button type="button" class="link-row" id="pick-another">Wrong event? Pick another</button>
+      </div>
+      <div class="setup-b">
+        <div class="d-label">This phone is</div>
+        <div class="door-grid" id="door-grid" role="radiogroup" aria-label="This phone is"></div>
+        <p class="d-note">Shown on every scan so you know which door let someone in.</p>
+        <div class="grow-space"></div>
+        <p class="d-error" id="setup-error" role="alert"></p>
+        <button type="button" class="d-cta" id="start-btn">Start scanning</button>
+      </div>
     </div>
   </section>
 
@@ -165,6 +171,18 @@
       </div>
     </div>
   </section>
+
+  <!-- Confirm sheet -->
+  <div id="ask" class="d-ask" hidden role="alertdialog" aria-modal="true" aria-labelledby="ask-title" aria-describedby="ask-text">
+    <div class="d-ask-sheet">
+      <h2 class="d-title" id="ask-title"></h2>
+      <p class="d-sub" id="ask-text"></p>
+      <div class="two-btns">
+        <button type="button" id="ask-no">Cancel</button>
+        <button type="button" class="danger solid" id="ask-yes"></button>
+      </div>
+    </div>
+  </div>
 
   <script src="/js/codes.js"></script>
   <script src="/js/scanner.js"></script>
