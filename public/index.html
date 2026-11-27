@@ -40,9 +40,11 @@
         <div class="chips" id="device-chips"></div>
       </div>
       <div class="grow-space"></div>
-      <p id="login-error" class="error" role="alert"></p>
-      <button class="primary btn-xl" type="submit" id="login-btn">Start scanning</button>
-      <p class="login-foot">Add this page to your home screen for full-screen scanning.</p>
+      <div class="login-cta">
+        <p id="login-error" class="error" role="alert"></p>
+        <button class="primary btn-xl" type="submit" id="login-btn">Start scanning</button>
+        <p class="login-foot">Add this page to your home screen for full-screen scanning.</p>
+      </div>
     </form>
   </section>
 
@@ -119,6 +121,7 @@
     <div class="page-body">
       <ul id="search-results" class="guests"></ul>
       <p id="search-empty" class="empty" hidden>No guests match. Check the spelling, or try their email.</p>
+      <p id="search-hint" class="empty">Search by first or last name, or email. It finds guests from every platform, including lists without QR codes.</p>
     </div>
   </section>
 
