@@ -50,7 +50,7 @@ Any host that runs Docker and keeps a disk works the same way (Render with a dis
 1. **Day before:** create the event and door PIN, connect every source, check each source's count matches that platform's dashboard.
 2. **Test:** buy one ticket per platform (activate the DICE one in the app). In the admin, *Test a code* (or in the door app, More → Test mode) shows what the QR contains and whether it matches.
 3. **An hour before doors:** re-upload RA and Bucket Listers exports as "full current list", and the Posh CSV. API sources keep syncing on their own.
-4. **At the door:** each phone signs in with the PIN and a name (Door 1, VIP door). Open it once with signal so the list downloads. After that it works offline.
+4. **At the door:** each phone types the door PIN on the keypad. The PIN finds tonight's event, so give every event its own PIN; if two shows share one, the phone asks which. Pick which door the phone is (Door 1, Door 2, VIP, Box office) and tap Start scanning. Open it once with signal so the list downloads. After that it works offline, and it skips straight to scanning next time.
 5. **After:** Export → Tickets CSV gives platform, ticket type and checked-in time for every ticket.
 
 ## What the door sees
@@ -58,7 +58,8 @@ Any host that runs Docker and keeps a disk works the same way (Render with a dis
 - **ADMIT** (green): valid and first scan.
 - **ALREADY SCANNED** (red): shows when and at which door it was first scanned.
 - **NOT VALID** (dark red): refunded, resold, transferred or returned, with the reason.
-- **NOT FOUND** (orange): not on any list. If the event has API sources, it checks them again on the spot: scan again after 10 seconds, or search by name.
+- **NOT FOUND** (orange): not on any list. If the event has API sources, it checks them again on the spot: scan again after 10 seconds, or tap Find guest.
+- **Find guest** takes a name, an email or the code printed under the QR. A typed code is checked like a scan when you tap Go. The last admit stays at the bottom of the scan screen with an Undo button.
 
 A code imported from two sources still only gets in once. Offline phones decide from their own copy and upload later. If two offline phones let the same ticket in, the admin flags it as a double entry.
 
@@ -70,7 +71,7 @@ A code imported from two sources still only gets in once. Offline phones decide 
 - **Posh** doesn't publish its webhook format. Every webhook is stored; in the admin you point at the QR field once and it re-imports everything received so far.
 - **Safety check:** if an automatic sync would void more than 30% of a source's tickets at once, it holds back and asks you to force it. An empty API response an hour before doors is more likely a glitch than a wave of refunds.
 - Scans made here don't show up in the platforms' own dashboards. This app is the attendance record.
-- **Look:** the Moji design from Claude Design. Archivo and JetBrains Mono load from Google Fonts and are cached on each phone; with no signal it falls back to the bundled Archivo Black for the big type and the phone's own fonts for the rest. The admin shows each event's door PIN, and you can admit a guest from the admin's ticket list.
+- **Look:** the Moji design from Claude Design (door app: Moji Door Scanner v6). Archivo and JetBrains Mono load from Google Fonts and are cached on each phone; with no signal it falls back to the bundled Archivo Black for the big type and the phone's own fonts for the rest. The admin shows each event's door PIN, and you can admit a guest from the admin's ticket list.
 - Door phones keep names and emails offline. Signing out of the door app deletes them from the phone.
 
 ## Settings
