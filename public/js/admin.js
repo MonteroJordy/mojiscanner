@@ -36,6 +36,18 @@
     return n;
   }
 
+  var ICONS = { check: 'M5.5 12.8l4.2 4.2L18.5 7.8', chev: 'M15 5.5 21.5 12 15 18.5', back: 'M19.5 12h-15M10.5 5.5 4 12l6.5 6.5' };
+  function ico(name) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('class', 'ico');
+    svg.setAttribute('aria-hidden', 'true');
+    var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', ICONS[name]);
+    svg.appendChild(path);
+    return svg;
+  }
+
   async function api(method, path, body, opts) {
     opts = opts || {};
     var headers = { 'X-Requested-With': 'door-admin' };
@@ -609,15 +621,12 @@
 
   function isStale(s) { return s.kind === 'file' && s.lastSyncAt && Date.now() - new Date(s.lastSyncAt).getTime() > STALE_MS; }
 
-  // What needs doing before doors, each with the button that fixes it.
-  function problems(data) {
+  function eventOver(ev) { var t = Date.parse(ev.startsAt); return !isNaN(t) && Date.now() > t + 10 * 3600e3; }
+
+  // Lists that need attention before doors, each with the button that fixes it.
+  function sourceFixes(data) {
     var ev = data.event;
-    var start = Date.parse(ev.startsAt);
-    var over = !isNaN(start) && Date.now() > start + 10 * 3600e3;
     var out = [];
-    if (!over && !ev.archived && weakPin(ev.doorPin)) {
-      out.push({ key: 'pin', text: 'Door PIN ' + ev.doorPin + ' is easy to guess. Anyone with the door link could try it.', action: ['Change PIN', function () { changePin(ev); }] });
-    }
     data.sources.forEach(function (s) {
       var upload = '#/event/' + ev.id + '/upload/' + s.id;
       if (s.kind === 'api' && s.lastSyncOk === false) {
@@ -627,14 +636,20 @@
           var btn = e.currentTarget;
           if (await ask('Void the missing tickets?', 'Every ticket that is no longer on ' + s.platformName + ' gets voided. Door phones show NOT VALID if someone scans one.', 'Void them', true)) runSync(s, { force: true }, btn);
         }] });
-      } else if (s.kind === 'file' && !over) {
+      } else if (s.kind === 'file') {
         if (!s.lastSyncAt) out.push({ s: s, text: 'No file uploaded yet.', action: ['Upload file', upload] });
-        else if (isStale(s)) out.push({ s: s, text: 'List uploaded ' + ago(s.lastSyncAt) + '. Upload a fresh export before doors so refunds and resales get caught.', action: ['Upload file', upload] });
+        else if (isStale(s)) out.push({ s: s, text: 'Uploaded ' + ago(s.lastSyncAt) + '. Upload a fresh export so refunds and resales get caught.', action: ['Upload file', upload] });
       }
     });
+    return out;
+  }
+
+  // What the door did that needs a look.
+  function doorFlags(data) {
     var flags = data.stats.flags || {};
-    if (flags.double_entry) out.push({ text: flags.double_entry + (flags.double_entry === 1 ? ' ticket' : ' tickets') + ' got in twice while a phone was offline.', action: ['Show', showFlagged] });
-    if (flags.voided_after_scan) out.push({ text: flags.voided_after_scan + (flags.voided_after_scan === 1 ? ' ticket was' : ' tickets were') + ' refunded, resold or transferred after the scan.', action: ['Show', showFlagged] });
+    var out = [];
+    if (flags.double_entry) out.push(flags.double_entry + (flags.double_entry === 1 ? ' ticket' : ' tickets') + ' got in twice while a phone was offline.');
+    if (flags.voided_after_scan) out.push(flags.voided_after_scan + (flags.voided_after_scan === 1 ? ' ticket was' : ' tickets were') + ' refunded, resold or transferred after the scan.');
     return out;
   }
 
@@ -644,12 +659,82 @@
     location.hash = tabHref(view.id, 'guests');
   }
 
+  // Ready for doors: tickets in and up to date, then the door staff. Each step carries the one button that moves it on.
+  function readySteps(data) {
+    var ev = data.event;
+    var st = data.stats;
+    var sources = data.sources;
+    var steps = [];
+    if (!sources.length) {
+      steps.push({ key: 'tickets', state: 'todo', title: 'Add where you sold tickets', sub: 'Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV. Door phones scan all of them.',
+        action: el('a', { class: 'btn primary', href: '#/event/' + ev.id + '/add', text: 'Add source', 'data-fk': 'add' }) });
+    } else {
+      var fixes = sourceFixes(data);
+      var title = st.valid ? plural(st.valid, 'ticket', 'tickets') + ' from ' + plural(sources.length, 'source', 'sources') : 'No tickets yet';
+      if (fixes.length) steps.push({ key: 'tickets', state: 'warn', title: title, sub: fixes.length === 1 ? '1 list needs attention.' : fixes.length + ' lists need attention.', fixes: fixes });
+      else if (!st.valid) steps.push({ key: 'tickets', state: 'todo', title: title, sub: 'They show up here as soon as a source brings some in.' });
+      else steps.push({ key: 'tickets', state: 'done', title: title, sub: 'Every list is up to date.' });
+    }
+    var pin = ev.doorPin || '';
+    var signedIn = (data.devices || []).filter(function (d) { return !d.revoked; }).length;
+    var send = function (primary) { return el('button', { type: 'button', class: primary ? 'primary' : 'sm', text: 'Send to staff', 'data-fk': 'send', onclick: function () { shareDoor(ev); } }); };
+    if (weakPin(pin)) {
+      steps.push({ key: 'pin', state: 'warn', title: 'Change the door PIN', sub: 'PIN ' + pin + ' is easy to guess. Anyone with the door link could try it.',
+        action: el('button', { type: 'button', class: 'primary', text: 'Change PIN', 'data-fk': 'pin', onclick: function () { changePin(ev); } }) });
+    } else if (!signedIn) {
+      steps.push({ key: 'staff', state: 'todo', title: 'Send the door link to your staff', sub: 'They open it on their phone, type ' + (pin ? 'PIN ' + pin : 'the door PIN') + ' and pick their door.', action: send(true) });
+    } else {
+      steps.push({ key: 'staff', state: 'done', title: plural(signedIn, 'door phone', 'door phones') + ' signed in', sub: 'More staff? Send them the link too.', action: send(false) });
+    }
+    return steps;
+  }
+
+  function readyBlock(data, fresh) {
+    var steps = readySteps(data);
+    var done = steps.filter(function (s) { return s.state === 'done'; }).length;
+    var all = done === steps.length;
+    // All done: one quiet line instead of a checklist, so the night's numbers stay on top.
+    if (all) {
+      var line = el('div', { class: 'ready-list ready-done' }, [el('div', { class: 'rs done', 'data-key': 'ready' }, [
+        el('span', { class: 'rs-mark', 'aria-hidden': 'true' }, [ico('check')]),
+        el('div', { class: 'rs-text' }, [el('strong', { text: 'Ready for doors' }), el('span', { class: 'rs-sub', text: steps.map(function (s) { return s.title; }).join(' · ') })]),
+        el('div', { class: 'rs-act' }, [el('button', { type: 'button', class: 'sm', text: 'Send to staff', 'data-fk': 'send', onclick: function () { shareDoor(data.event); } })]),
+      ])]);
+      if (fresh) stagger([line]);
+      return [line];
+    }
+    var list = el('ol', { class: 'ready-list' }, steps.map(function (s, i) {
+      var mark = s.state === 'done' ? [ico('check')] : [s.state === 'warn' ? '!' : String(i + 1)];
+      return el('li', { class: 'rs ' + s.state, 'data-key': s.key }, [
+        el('span', { class: 'rs-mark', 'aria-hidden': 'true' }, mark),
+        el('div', { class: 'rs-text' }, [
+          el('strong', null, [el('span', { class: 'offscreen', text: { done: 'Done: ', warn: 'Needs attention: ', todo: 'To do: ' }[s.state] }), s.title]),
+          el('span', { class: 'rs-sub', text: s.sub }),
+        ]),
+        s.action ? el('div', { class: 'rs-act' }, [s.action]) : null,
+        s.fixes ? el('ul', { class: 'rs-fixes' }, s.fixes.map(function (it) {
+          var a = it.action;
+          var key = 'fix-' + it.s.id;
+          var btn = typeof a[1] === 'string' ? el('a', { class: 'btn sm', href: a[1], text: a[0], 'data-fk': key }) : el('button', { type: 'button', class: 'sm', text: a[0], 'data-fk': key, onclick: a[1] });
+          return el('li', null, [el('span', { class: 'badge', text: it.s.platformName }), el('span', { class: 'fx-text', text: it.text }), btn]);
+        })) : null,
+      ]);
+    }));
+    if (fresh) stagger(list.children);
+    return [
+      el('div', { class: 'section-head' }, [el('h2', { text: 'Ready for doors' }), el('span', { class: 'ready-count', text: done + ' of ' + steps.length + ' done' })]),
+      list,
+    ];
+  }
+
   function renderOverview(box, data, opts) {
     var fresh = opts && opts.fresh;
     var st = data.stats;
     var rows = st.rows || {};
     var ev = data.event;
     var prev = view && view.prev; // what's on screen now: a refresh glides from there
+    // A refresh redraws the page: whatever had keyboard focus gets it back.
+    var had = document.activeElement && box.contains(document.activeElement) ? document.activeElement.getAttribute('data-fk') : null;
     box.textContent = '';
     var pct = st.valid ? Math.round(100 * st.scanned / st.valid) : 0;
     var phones = activePhones(data);
@@ -685,36 +770,40 @@
     }
     if (view) view.prev = { scanned: st.scanned, pct: pct };
 
-    var issues = problems(data);
-    if (issues.length) {
-      box.appendChild(el('section', { class: 'attention', 'aria-label': 'Needs attention' }, [
-        el('h2', { text: issues.length === 1 ? '1 thing to fix' : issues.length + ' things to fix' }),
-        el('ul', null, issues.map(function (it) {
-          var a = it.action;
-          var btn = typeof a[1] === 'string' ? el('a', { class: 'btn sm', href: a[1], text: a[0] }) : el('button', { type: 'button', class: 'sm', text: a[0], onclick: a[1] });
-          return el('li', { 'data-key': it.key || null }, [it.s ? el('span', { class: 'badge', text: it.s.platformName }) : el('span', { class: 'tag warn', text: 'Check' }), el('span', { class: 'att-text', text: it.text }), btn]);
-        })),
+    // Something at the door needs a look: right under the count.
+    var flags = doorFlags(data);
+    if (flags.length) box.appendChild(el('ul', { class: 'flag-list', 'aria-label': 'Needs a look' }, flags.map(function (text, i) {
+      return el('li', null, [el('span', { class: 'tag warn', text: 'Check' }), el('span', { class: 'fx-text', text: text }), el('button', { type: 'button', class: 'sm', text: 'Show', 'data-fk': 'flag-' + i, onclick: showFlagged })]);
+    })));
+
+    var over = eventOver(ev);
+    if (!over && !ev.archived) readyBlock(data, fresh).forEach(function (node) { box.appendChild(node); });
+
+    var byId = {};
+    (st.bySource || []).forEach(function (s) { byId[s.source_id] = s; });
+    if (data.sources.length) {
+      box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/add', text: 'Add source', 'data-fk': 'add-more' })]));
+      var list = el('div', { class: 'src-list' }, data.sources.map(function (s) { return sourceRow(ev, s, byId[s.id] || { valid: 0, scanned: 0, void: 0 }); }));
+      box.appendChild(list);
+      if (fresh && !(view && view.prevSrc)) stagger(list.children);
+      if (view) {
+        view.prevSrc = {}; view.prevNums = {};
+        data.sources.forEach(function (s) { var c = byId[s.id] || { valid: 0, scanned: 0, void: 0 }; view.prevSrc[s.id] = pctOf(c); view.prevNums[s.id] = { valid: c.valid, scanned: c.scanned, void: c.void }; });
+      }
+    } else if (over || ev.archived) {
+      box.appendChild(el('p', { class: 'muted empty-line', text: 'No ticket sources were added to this event.' }));
+    }
+
+    // After the night: the two spreadsheets people ask for.
+    if (over && (rows.all || st.lastScanAt)) {
+      box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Downloads' })]));
+      box.appendChild(el('div', { class: 'downloads' }, [
+        el('a', { class: 'btn', href: '/api/admin/events/' + ev.id + '/export/tickets.csv', text: 'Guest list (CSV)' }),
+        el('a', { class: 'btn', href: '/api/admin/events/' + ev.id + '/export/scans.csv', text: 'Scan log (CSV)' }),
       ]));
     }
 
-    var none = !data.sources.length;
-    box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), none ? null : el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/add', text: 'Add source' })]));
-    var byId = {};
-    (st.bySource || []).forEach(function (s) { byId[s.source_id] = s; });
-    if (none) {
-      box.appendChild(el('div', { class: 'empty-card gap-bottom' }, [
-        el('p', { text: 'Add every platform this event sold on: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV export. Door phones scan all of them.' }),
-        el('a', { class: 'btn primary', href: '#/event/' + ev.id + '/add', text: 'Add source' }),
-      ]));
-      return;
-    }
-    var list = el('div', { class: 'src-list' }, data.sources.map(function (s) { return sourceRow(ev, s, byId[s.id] || { valid: 0, scanned: 0, void: 0 }); }));
-    box.appendChild(list);
-    if (fresh && !(view && view.prevSrc)) stagger(list.children);
-    if (view) {
-      view.prevSrc = {}; view.prevNums = {};
-      data.sources.forEach(function (s) { var c = byId[s.id] || { valid: 0, scanned: 0, void: 0 }; view.prevSrc[s.id] = pctOf(c); view.prevNums[s.id] = { valid: c.valid, scanned: c.scanned, void: c.void }; });
-    }
+    if (had) { var back = box.querySelector('[data-fk="' + had + '"]'); if (back) back.focus({ preventScroll: true }); }
   }
 
   // The custom label without a repeated platform name ("Shotgun · Riva Starr @ Sable" → "Riva Starr @ Sable").
@@ -744,14 +833,6 @@
     return isStale(s) ? ['warn', 'Uploaded ' + ago(s.lastSyncAt)] : ['', 'Uploaded ' + fmtClock(s.lastSyncAt)];
   }
 
-  // The one thing you do most with each kind of source.
-  function primaryAction(ev, s) {
-    if (s.kind === 'api') return el('button', { type: 'button', class: 'sm', text: 'Sync now', onclick: function (e) { runSync(s, {}, e.currentTarget); } });
-    if (s.kind === 'webhook') return el('button', { type: 'button', class: 'sm', text: 'Setup', 'aria-label': 'Webhook setup', onclick: function () { webhookSetup(ev, s); } });
-    var due = !s.lastSyncAt || isStale(s);
-    return el('a', { class: 'btn sm' + (due ? ' primary' : ''), href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file' });
-  }
-
   function pctOf(c) { return c && c.valid ? Math.min(100, Math.round(100 * c.scanned / c.valid)) : 0; }
   // from: the counts on screen before a refresh; the numbers glide from them to the new ones.
   function srcNums(counts, cls, fromPct, from) {
@@ -769,21 +850,21 @@
     ]);
   }
 
-  // A row says what the source is and how it's doing; tapping it opens everything else.
+  // A row says what the source is and how it's doing; tapping it opens everything you can do with it.
   function sourceRow(ev, s, counts) {
     var label = sourceLabel(s);
     var state = sourceState(s);
     var failed = s.kind === 'api' && s.lastSyncOk === false;
-    var open = el('button', { type: 'button', class: 'src-open', 'aria-label': 'Manage ' + s.platformName + (label ? ', ' + label : ''), onclick: function () { sourceSheet(ev, s, counts); } }, [
+    var open = el('button', { type: 'button', class: 'src-open', 'data-fk': 'src-' + s.id, 'aria-label': 'Manage ' + s.platformName + (label ? ', ' + label : ''), onclick: function () { sourceSheet(ev, s, counts); } }, [
       // Platform and name on one line, state under it: every row starts its text at the same edge.
       el('span', { class: 'src-id' }, [
         el('span', { class: 'src-title' }, [el('span', { class: 'badge', text: s.platformName }), el('strong', { text: label || HOW[s.kind] })]),
         el('span', { class: 'src-state' }, [el('span', { class: 'dot ' + state[0] }), el('span', { text: (label ? HOW_SHORT[s.kind] + ' · ' : '') + state[1] })]),
       ]),
       srcNums(counts, null, view && view.prevSrc ? view.prevSrc[s.id] : 0, view && view.prevNums ? view.prevNums[s.id] : null), // a refresh glides, it doesn't restart
-      el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }),
+      el('span', { class: 'chev', 'aria-hidden': 'true' }, [ico('chev')]),
     ]);
-    return el('div', { class: 'src-row' + (failed ? ' failed' : '') }, [open, el('div', { class: 'src-actions' }, [primaryAction(ev, s)])]);
+    return el('div', { class: 'src-row' + (failed ? ' failed' : '') }, [open]);
   }
 
   // Everything for one source in one place: state, numbers, what you can do, and Remove at the bottom.
@@ -837,33 +918,53 @@
 
   // ------------------------------------------------------------------ add a source
 
+  // Where to get each file, and how a webhook gets set up.
   var HELP = {
     shotgun: {
-      api: ['In Shotgun Backstage go to Settings → Integrations → Shotgun APIs and click Connect.', 'Copy the Organizer ID, then click Issue token and copy the token.', 'Open the event in Backstage. Its ID is the number at the end of the address (backstage.shotgun.live/events/123456). Pasting the whole address works too.', 'Transfers cancel the old QR and issue a new one, so this pulls changes every minute, and right away when the door scans a code it doesn\'t know.'],
       file: ['Export the attendee list from Smartboard as CSV with the scan code column.'],
     },
     dice: {
-      api: ['In MIO click your company name (bottom left) → Manage → Access tokens.', 'Click the token under Ticket holder API access tokens to copy it, and paste it below. Not the Event API token.', 'Click Load my DICE events and pick the show. The event box fills itself.', 'DICE keeps the ticket code behind restricted access. If the first sync says the fields are restricted, ask your DICE rep to enable restricted fields (ticket code) on your Ticket Holders API token for door access control.', 'Fans see their QR in the DICE app about 2 hours before the event. Scan one in the door app with Test mode on (More → Test mode) before doors. DICE calls its QR "animated": if it doesn\'t match, check DICE guests in with Search.'],
-      file: ['Ask your DICE rep for the barcode export for this event (the file they give venue scanning systems) and upload it here.', 'Only have a list of names? Upload it with the QR column set to "None in this file". Staff check those guests in by name. Remove it once you have DICE codes, or people count twice.'],
+      file: ['Ask your DICE rep for the barcode export for this event (the file they give venue scanning systems).', 'Only have a list of names? Upload it and set the QR column to "None in this file": staff check those guests in by name. Remove it once you have DICE codes, or people count twice.'],
     },
     ra: {
-      file: ['In RA Pro open the event → Audience Data → Export Audience.', 'Keep the fields RA selects by default (they include the barcode) and export as CSV.', 'Upload it here. Re-export and upload again right before doors: resales cancel the old barcode and issue a new one.', 'RA prints an 8-digit barcode ID under each QR. If the export\'s barcode column holds that number, door staff can type it when a screen won\'t scan (check with a test ticket).'],
+      file: ['RA Pro → the event → Audience Data → Export Audience. Keep the fields RA selects (they include the barcode) and export as CSV.', 'Upload a fresh export right before doors: resales cancel the old barcode and issue a new one.', 'RA prints an 8-digit barcode ID under each QR. If the export\'s barcode column holds that number, door staff can type it when a screen won\'t scan.'],
     },
     bucketlisters: {
-      file: ['Bucket Listers has no public API. Ask your partner contact for a CSV of the QR values for your event before doors (or email partner@bucketlisters.com).', 'If they can only send names and emails, upload that with the QR column set to "None in this file". Staff find those guests with Search and tap Admit. Pick the quantity column if one row covers several tickets.'],
+      file: ['Bucket Listers has no public API. Ask your partner contact for a CSV of the QR values for your event (or email partner@bucketlisters.com).', 'Only names and emails? Upload them and set the QR column to "None in this file": staff find those guests with Find guest. Pick the quantity column if one row covers several tickets.'],
     },
     eventbrite: {
-      api: ['In Eventbrite go to Account Settings → Developer Links → API Keys and copy your private token.', 'The event ID is the number at the end of the event URL.'],
       file: ['Export the attendee report as CSV including the Barcode column.'],
     },
     posh: {
-      webhook: ['Add this source, then copy the webhook address it shows you.', 'In Posh go to Settings → API Webhooks, paste the address and select Order Created.', 'Buy one test ticket. The payload shows up here so you can point at the QR field once.', 'Posh doesn\'t send refunds by webhook: upload the attendee CSV export right before doors to void refunds.'],
-      file: ['Export the event\'s attendee/orders CSV from Posh and upload it.', 'If it has no QR column, it still works as a name-only list: staff check those guests in by name.'],
+      webhook: ['Add it here and copy the webhook address it gives you.', 'In Posh go to Settings → API Webhooks, paste the address and select Order Created.', 'Buy one test ticket, then point at the QR field once.', 'Posh doesn\'t send refunds by webhook: upload the attendee CSV right before doors to void them.'],
+      file: ['Export the event\'s attendee or orders CSV from Posh.', 'No QR column? It still works as a name-only list: staff check those guests in by name.'],
     },
     other: {
-      file: ['Any CSV with one row per ticket and a column holding the QR / barcode value works.', 'A list of names without codes works too (guest list, comps): set the QR column to "None in this file" and staff check them in by name.'],
+      file: ['Any CSV with one row per ticket and a column holding the QR or barcode value.', 'A list of names without codes works too (guest list, comps): set the QR column to "None in this file" and staff check them in by name.'],
       webhook: ['Point any platform that can POST JSON at the address shown after adding.'],
     },
+  };
+
+  // API sources: where to find each value sits right under its box. What only matters later folds away.
+  var FIELD_HINTS = {
+    shotgun: {
+      organizerId: 'Backstage → Settings → Integrations → Shotgun APIs → Connect.',
+      token: 'Same page: Issue token, then copy it.',
+      eventId: 'The number at the end of the event\'s Backstage address. Pasting the whole address works.',
+    },
+    dice: {
+      token: 'MIO → your company name (bottom left) → Manage → Access tokens. The Ticket holder API token, not the Event API token.',
+      eventId: 'Tap Load my DICE events and pick the show.',
+    },
+    eventbrite: {
+      token: 'Account Settings → Developer Links → API Keys.',
+      eventId: 'The number at the end of the event\'s URL.',
+    },
+  };
+  var API_NOTES = {
+    shotgun: ['Transfers cancel the old QR and issue a new one, so this pulls changes every minute, and right away when the door scans a code it doesn\'t know.'],
+    dice: ['DICE keeps the ticket code behind restricted access. If the first sync says the fields are restricted, ask your DICE rep to enable restricted fields (ticket code) on your Ticket Holders API token for door access control.', 'Fans see their QR in the DICE app about 2 hours before the event. Scan one in the door app with Test mode on (More → Test mode) before doors. If a DICE QR doesn\'t match, check the guest in with Find guest.'],
+    eventbrite: ['Refunds and cancellations on Eventbrite void the ticket on the next sync.'],
   };
 
   function kindBlurb(platform, kind) {
@@ -873,12 +974,30 @@
     return (platform === 'other' ? 'The platform' : name) + ' sends each sale the moment it happens.';
   }
 
-  function afterNotes(platform, kind) {
+  // One line under the button: what happens next.
+  function afterNote(platform, kind) {
     var name = platformName(platform);
-    if (kind === 'api') return ['Tickets show up in the Tickets tab within ' + (PLATFORMS[platform].every === 1 ? 'a minute' : PLATFORMS[platform].every + ' minutes') + '.', 'Door phones download the list on their next sync.', 'Refunds and transfers on ' + name + ' void the ticket automatically.'];
-    if (kind === 'file') return ['Upload a fresh export right before doors: refunds and resales only show up when you upload again.', 'Door phones download the list on their next sync.', 'A full-list upload voids tickets that are missing from the new file.'];
-    return ['Each sale shows up the moment it arrives.', 'You point at the QR field once, using your first test sale.', platform === 'posh' ? 'Posh doesn\'t send refunds: upload its CSV before doors to void them.' : 'Refunds only arrive if the platform sends them.'];
+    if (kind === 'api') return 'Tickets show up within ' + (PLATFORMS[platform].every === 1 ? 'a minute' : PLATFORMS[platform].every + ' minutes') + ', and door phones pick them up on their next sync. Refunds and transfers on ' + name + ' void the ticket by themselves.';
+    return 'Each sale shows up the moment it arrives. ' + (platform === 'posh' ? 'Posh doesn\'t send refunds: upload its CSV before doors to void them.' : 'Refunds only arrive if the platform sends them.');
   }
+
+  // A drop area with a file picker inside: the whole box is the button.
+  function dropzone(input, onFile) {
+    var zone = el('label', { class: 'dropzone' }, [
+      input,
+      el('div', { class: 'drop-text', text: 'Drop the CSV here, or' }),
+      el('span', { class: 'btn primary', text: 'Choose a CSV file' }),
+      el('small', { class: 'muted', text: 'Excel file? Open it and save it as CSV first.' }),
+    ]);
+    input.addEventListener('change', function () { onFile(input.files[0]); });
+    zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('over'); });
+    zone.addEventListener('dragleave', function () { zone.classList.remove('over'); });
+    zone.addEventListener('drop', function (e) { e.preventDefault(); zone.classList.remove('over'); onFile(e.dataTransfer.files[0]); });
+    return zone;
+  }
+
+  // A file chosen on the Add source page, handed to the upload page so it opens on the columns.
+  var pendingFile = null;
 
   async function renderAddSource(eventId) {
     var data;
@@ -891,45 +1010,82 @@
     var head = pageHead([{ text: 'Events', href: '#/' }, { text: ev.name, href: '#/event/' + ev.id }, { text: 'Sources' }], 'Add a ticket source', [el('a', { class: 'btn', href: '#/event/' + ev.id, text: 'Cancel' })]);
     head.querySelector('.head-actions').classList.add('back-only'); // phones use the back link above the title
     main.appendChild(head);
-    var left = el('div');
-    var right = el('div', { class: 'side-card' });
-    main.appendChild(el('div', { class: 'split' }, [left, right]));
+    var flow = el('div', { class: 'add-flow' });
+    main.appendChild(flow);
 
-    function step(num, title, body) {
-      return el('div', { class: 'step' }, [el('div', { class: 'step-n', text: String(num) }), el('div', null, [el('h2', { text: title }), body])]);
+    function step(num, title, body, cls) {
+      return el('div', { class: 'step' + (cls ? ' ' + cls : '') }, [el('div', { class: 'step-n', text: String(num) }), el('div', null, [el('h2', { text: title }), body])]);
     }
 
-    // changed: 'platform' or 'kind', so only the steps that changed slide in (step 1 never jumps).
-    function draw(changed) {
-      left.textContent = '';
-      left.appendChild(step(1, 'Pick the platform', el('div', { class: 'pick-grid' }, Object.keys(PLATFORMS).map(function (p) {
-        var on = state.platform === p;
-        return el('button', { type: 'button', class: 'pick' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', onclick: function () { var was = state.platform; state.platform = p; state.kind = PLATFORMS[p].kinds[0]; draw(was === p ? null : 'platform'); } }, [
-          el('span', { class: 'pn', text: PLATFORMS[p].name }),
-          on ? el('span', { class: 'label', text: 'Selected' }) : added[p] ? el('span', { class: 'label done', text: '✓ Added' }) : null,
-        ]);
-      }))));
-      right.textContent = '';
-      right.appendChild(el('div', { class: 'label sm', text: 'After you add it' }));
-      if (!state.platform) {
-        right.appendChild(el('p', { text: 'Add one source per platform you sold on. Each door phone scans all of them.' }));
+    // One step at a time: once a platform is picked, the grid folds into one line with Change next to it.
+    // changed: 'platform', 'kind' or 'change', so only the steps that changed slide in.
+    function draw(changed, byKeyboard) {
+      flow.textContent = '';
+      var p = state.platform;
+      if (!p) {
+        flow.appendChild(step(1, 'Pick the platform', el('div', { class: 'pick-grid' }, Object.keys(PLATFORMS).map(function (key) {
+          return el('button', { type: 'button', class: 'pick', 'data-p': key, onclick: function (e) { state.platform = key; state.kind = PLATFORMS[key].kinds[0]; draw('platform', e.detail === 0); } }, [
+            el('span', { class: 'pn', text: PLATFORMS[key].name }),
+            added[key] ? el('span', { class: 'label done' }, [ico('check'), 'Added']) : null,
+          ]);
+        }))));
+        flow.appendChild(el('p', { class: 'muted add-note', text: 'Add one source per platform you sold on. Door phones scan all of them.' }));
+        if (changed === 'change') {
+          stagger(flow.querySelectorAll('.pick'));
+          var was = flow.querySelector('.pick[data-p="' + state.was + '"]');
+          if (was && byKeyboard) was.focus();
+        }
         return;
       }
-      var p = state.platform;
+      var change = el('button', { type: 'button', class: 'sm', text: 'Change', 'aria-label': 'Change platform', onclick: function (e) { state.was = p; state.platform = null; draw('change', e.detail === 0); } });
+      flow.appendChild(step(1, 'Platform', el('div', { class: 'picked' }, [
+        el('strong', { text: PLATFORMS[p].name }),
+        added[p] ? el('span', { class: 'label done' }, [ico('check'), 'Already added']) : null,
+        change,
+      ]), 'is-picked'));
       var kinds = PLATFORMS[p].kinds;
-      if (kinds.length > 1) left.appendChild(step(2, 'How tickets get in', el('div', { class: 'pick-grid' }, kinds.map(function (k, i) {
+      if (kinds.length > 1) flow.appendChild(step(2, 'How tickets get in', el('div', { class: 'pick-grid kinds' }, kinds.map(function (k, i) {
         var on = state.kind === k;
         return el('button', { type: 'button', class: 'pick kind' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', onclick: function () { var was = state.kind; state.kind = k; draw(was === k ? null : 'kind'); } }, [
-          el('div', { class: 'top' }, [el('span', { text: KIND_NAMES[k] }), i === 0 && kinds.length > 1 ? el('span', { class: 'label', text: 'Recommended' }) : null]),
+          el('div', { class: 'top' }, [el('span', { text: KIND_NAMES[k] }), i === 0 ? el('span', { class: 'label', text: 'Recommended' }) : null]),
           el('div', { class: 'd', text: kindBlurb(p, k) }),
         ]);
       }))));
-      var title = state.kind === 'api' ? 'Connect ' + PLATFORMS[p].name : state.kind === 'file' ? 'Upload from ' + PLATFORMS[p].name : 'Webhook from ' + PLATFORMS[p].name;
-      left.appendChild(step(kinds.length > 1 ? 3 : 2, title, sourceForm(ev, p, state.kind, null)));
-      afterNotes(p, state.kind).forEach(function (t) { right.appendChild(el('p', { text: t })); });
-      if (changed) stagger(Array.prototype.slice.call(left.children, changed === 'platform' ? 1 : left.children.length - 1).concat(Array.prototype.slice.call(right.children, 1)));
+      var name = PLATFORMS[p].name;
+      var title = state.kind === 'api' ? 'Connect ' + name : state.kind === 'file' ? 'Upload from ' + name : 'Webhook from ' + name;
+      var body = state.kind === 'file' ? fileStep(ev, p, data.sources.some(function (s) { return s.platform === p; })) : sourceForm(ev, p, state.kind, null);
+      flow.appendChild(step(kinds.length > 1 ? 3 : 2, title, body));
+      if (changed) stagger(Array.prototype.slice.call(flow.children, changed === 'kind' ? flow.children.length - 1 : 1));
+      if (byKeyboard) change.focus();
     }
     draw();
+  }
+
+  // A file source starts with the file: choose it here and the next page opens on its columns.
+  function fileStep(ev, platform, sameKind) {
+    var input = el('input', { type: 'file', accept: '.csv,.tsv,.txt,text/csv' });
+    var err = el('p', { class: 'error', role: 'alert' });
+    var taking = false;
+    var zone = dropzone(input, async function (file) {
+      err.textContent = '';
+      if (!file || taking) return;
+      if (/\.xlsx?$/i.test(file.name)) { err.textContent = 'That is an Excel file. Open it, save it as CSV, and upload the CSV.'; return; }
+      taking = true;
+      zone.classList.add('working');
+      try {
+        var body = { platform: platform, kind: 'file' };
+        // A second list from the same platform gets the file's name, so the two can be told apart.
+        if (sameKind) body.label = file.name.replace(/\.[^.]+$/, '').slice(0, 80);
+        var res = await api('POST', '/api/admin/events/' + ev.id + '/sources', body);
+        pendingFile = { id: res.source.id, file: file };
+        location.hash = '#/event/' + ev.id + '/upload/' + res.source.id;
+      } catch (ex) { err.textContent = ex.message; zone.classList.remove('working'); taking = false; }
+    });
+    var help = (HELP[platform] || {}).file || [];
+    return el('div', { class: 'file-step' }, [
+      zone, err,
+      help.length ? el('div', { class: 'file-help' }, [el('div', { class: 'label sm', text: 'Where to get the file' }), el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); }))]) : null,
+    ]);
   }
 
   // Fields for one source. existing = edit mode (inside a modal).
@@ -942,6 +1098,7 @@
     var help = (HELP[platform] || {})[kind] || [];
     if (help.length && !existing) parts.push(el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); })));
     var settings = existing ? existing.settings || {} : {};
+    var hints = FIELD_HINTS[platform] || {};
     function secret() { return el('input', { type: 'password', value: settings.token || '', required: !existing, autocomplete: 'off', placeholder: existing ? 'Leave as is to keep the saved token' : '' }); }
     if (kind === 'api') {
       if (platform === 'shotgun') {
@@ -949,7 +1106,8 @@
         inputs.token = secret();
         inputs.eventId = el('input', { value: settings.eventId || '', required: true, inputmode: 'numeric' });
         inputs.includeCohosted = el('input', { type: 'checkbox', checked: !!settings.includeCohosted });
-        parts.push(el('div', { class: 'form-grid three' }, [field('Organizer ID', inputs.organizerId), field('API token', inputs.token), field('Shotgun event ID', inputs.eventId)]));
+        parts.push(el('div', { class: 'form-grid' }, [field('Organizer ID', inputs.organizerId, hints.organizerId), field('API token', inputs.token, hints.token)]));
+        parts.push(el('div', { class: 'form-grid' }, [field('Shotgun event ID', inputs.eventId, hints.eventId)]));
         parts.push(el('label', { class: 'check' }, [inputs.includeCohosted, 'I\'m a co-host of this Shotgun event (not the main organizer)']));
       } else if (platform === 'dice') {
         inputs.token = secret();
@@ -967,17 +1125,21 @@
           loadBtn.disabled = false;
         } });
         pick.addEventListener('change', function () { if (pick.value) { inputs.eventId.value = pick.value; if (!label.value) label.value = 'DICE · ' + pick.options[pick.selectedIndex].text.split(' · ')[0]; } });
-        parts.push(el('div', { class: 'form-grid' }, [field('Ticket holder API token', inputs.token), field('DICE event ID', inputs.eventId)]));
+        parts.push(el('div', { class: 'form-grid' }, [field('Ticket holder API token', inputs.token, hints.token), field('DICE event ID', inputs.eventId, hints.eventId)]));
         parts.push(el('div', { class: 'toolbar-row' }, [loadBtn, pick]));
       } else if (platform === 'eventbrite') {
         inputs.token = secret();
         inputs.eventId = el('input', { value: settings.eventId || '', required: true, inputmode: 'numeric' });
-        parts.push(el('div', { class: 'form-grid' }, [field('Private token', inputs.token), field('Eventbrite event ID', inputs.eventId)]));
+        parts.push(el('div', { class: 'form-grid' }, [field('Private token', inputs.token, hints.token), field('Eventbrite event ID', inputs.eventId, hints.eventId)]));
       }
     }
-    parts.push(el('div', { class: 'form-grid' }, [field('Label (optional)', label)]));
-    var submit = el('button', { class: 'primary lg', type: 'submit', text: existing ? 'Save' : 'Add ' + PLATFORMS[platform].name + ' source' });
+    parts.push(el('div', { class: 'form-grid' }, [field('Label (optional)', label, existing ? null : 'Only needed if you add two lists from the same platform.')]));
+    var notes = kind === 'api' ? API_NOTES[platform] || [] : [];
+    if (notes.length) parts.push(el('details', { class: 'howto-fold' }, [el('summary', { text: 'Good to know' }), el('ul', { class: 'notes' }, notes.map(function (t) { return el('li', { text: t }); }))]));
+    var name = PLATFORMS[platform].name;
+    var submit = el('button', { class: 'primary lg', type: 'submit', text: existing ? 'Save' : kind === 'api' ? 'Connect ' + name : 'Add ' + name + ' webhook' });
     parts.push(el('div', { class: 'head-actions' }, [submit]));
+    if (!existing) parts.push(el('p', { class: 'muted after-note', text: afterNote(platform, kind) }));
     parts.push(result, err);
     return el('form', { onsubmit: async function (e) {
       e.preventDefault();
@@ -1008,7 +1170,7 @@
         if (kind === 'webhook') { location.hash = '#/event/' + ev.id; setTimeout(function () { webhookSetup(ev, res.source); }, 300); return; }
         busy(submit, false);
         if (res.sync && res.sync.ok) {
-          var done = el('div', { class: 'connect-result' }, [el('span', { class: 'ok', text: '✓' }), 'Connected. ' + res.sync.message]);
+          var done = el('div', { class: 'connect-result' }, [el('span', { class: 'ok' }, [ico('check')]), 'Connected. ' + res.sync.message]);
           result.appendChild(done);
           done.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'nearest' });
           setTimeout(function () { location.hash = '#/event/' + ev.id; }, 1800);
@@ -1020,15 +1182,14 @@
     } }, parts);
   }
 
+  // Settings for a connected source. When the last sync failed, why comes first.
   function editApiSource(ev, s) {
     var body = el('div');
     var close = modal(s.platformName + ' settings', body);
-    var help = (HELP[s.platform] || {}).api || [];
-    // The fields come first. The steps fold away; they open by themselves when the last sync failed.
-    if (help.length) body.appendChild(el('details', { class: 'howto-fold', open: s.lastSyncOk === false }, [
-      el('summary', { text: 'Where to find these' }),
-      el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); })),
-    ]));
+    if (s.lastSyncOk === false) {
+      var msg = splitMsg(s.lastSyncMessage);
+      body.appendChild(el('div', { class: 'callout warn' }, [el('p', { class: 'lead', text: msg[0] || 'The last sync failed.' }), msg[1] ? el('p', { class: 'detail', text: msg[1] }) : null]));
+    }
     body.appendChild(sourceForm(ev, s.platform, 'api', s, close));
   }
 
@@ -1045,52 +1206,54 @@
     var head = pageHead([{ text: 'Events', href: '#/' }, { text: ev.name, href: '#/event/' + ev.id }, { text: 'Sources' }], 'Upload file — ' + s.platformName, []);
     head.appendChild(headActions);
     main.appendChild(head);
-    var body = el('div');
+    var body = el('div', { class: 'import-flow' });
     main.appendChild(body);
     var input = el('input', { type: 'file', accept: '.csv,.tsv,.txt,text/csv' });
-    var err = el('p', { class: 'error' });
+    var err = el('p', { class: 'error', role: 'alert' });
+    var zone = dropzone(input, readFile);
 
     async function readFile(file) {
       err.textContent = '';
       if (!file) return;
       if (/\.xlsx?$/i.test(file.name)) { err.textContent = 'That is an Excel file. Open it, save it as CSV, and upload the CSV.'; return; }
+      zone.classList.add('working');
       var text = await file.text();
       try {
         var prev = await api('POST', '/api/admin/sources/' + s.id + '/import/preview', text, { contentType: 'text/csv; charset=utf-8' });
         renderMapping(file.name, prev, text);
-      } catch (ex) { err.textContent = ex.message; }
+      } catch (ex) {
+        // A file picked on the Add source page lands here before the chooser is on screen.
+        if (!zone.isConnected) chooser();
+        err.textContent = ex.message;
+      }
+      zone.classList.remove('working');
     }
-    input.addEventListener('change', function () { readFile(input.files[0]); });
 
     function chooser() {
       body.textContent = '';
-      var zone = el('label', { class: 'dropzone' }, [
-        input,
-        el('div', { class: 'label sm', text: 'CSV export' }),
-        el('div', { class: 'drop-text', text: 'Drop the file here, or' }),
-        el('span', { class: 'btn primary', text: 'Choose a CSV file' }),
-        el('small', { class: 'muted', text: 'Excel file? Open it and save it as CSV first.' }),
-      ]);
-      zone.addEventListener('dragover', function (e) { e.preventDefault(); zone.classList.add('over'); });
-      zone.addEventListener('dragleave', function () { zone.classList.remove('over'); });
-      zone.addEventListener('drop', function (e) { e.preventDefault(); zone.classList.remove('over'); readFile(e.dataTransfer.files[0]); });
+      if (input.parentNode !== zone) zone.insertBefore(input, zone.firstChild);
       var help = (HELP[s.platform] || {}).file || [];
-      var tips = el('div', { class: 'side-card' }, [el('div', { class: 'label sm', text: 'Where to get the file' })].concat(help.map(function (h) { return el('p', { text: h }); })));
-      body.appendChild(el('div', { class: 'split' }, [el('div', null, [zone, err]), tips]));
+      body.appendChild(el('div', { class: 'file-step' }, [
+        zone, err,
+        help.length ? el('div', { class: 'file-help' }, [el('div', { class: 'label sm', text: 'Where to get the file' }), el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); }))]) : null,
+      ]));
     }
 
     function renderMapping(fileName, prev, text) {
       body.textContent = '';
       headActions.textContent = '';
       headActions.classList.remove('back-only');
+      // The file input moves into the chip, so Replace works in browsers that won't open a detached picker.
+      input.value = '';
       headActions.appendChild(el('div', { class: 'file-chip' }, [
         el('span', { class: 'f', text: fileName }),
         el('span', { class: 'label xs', text: n(prev.rowCount) + ' rows' }),
         el('button', { type: 'button', class: 'text-btn', text: 'Replace', onclick: function () { input.value = ''; input.click(); } }),
+        input,
       ]));
       var mapping = Object.assign({}, prev.mapping);
       var FIELDS = [['code', 'QR code'], ['name', 'Name'], ['firstName', 'First name'], ['lastName', 'Last name'], ['email', 'Email'], ['ticketType', 'Ticket type'], ['quantity', 'Quantity'], ['status', 'Status'], ['extId', 'Ticket / order ID']];
-      var banner = el('div', { class: 'alert' }, [el('span', { class: 'tag warn', text: 'No QR column' }), el('div', null, ['This file has no QR code column. Guests from it can only be checked in with ', el('strong', { text: 'Search' }), ' at the door. Scanning their tickets will show NOT FOUND. If ' + (s.platform === 'other' ? 'the platform' : s.platformName) + ' can export ticket codes, upload that file instead.'])]);
+      var banner = el('div', { class: 'alert' }, [el('span', { class: 'tag warn', text: 'No QR column' }), el('div', null, ['This file has no QR code column. Guests from it can only be checked in with ', el('strong', { text: 'Find guest' }), ' at the door. Scanning their tickets will show NOT FOUND. If ' + (s.platform === 'other' ? 'the platform' : s.platformName) + ' can export ticket codes, upload that file instead.'])]);
       var previewTable = el('table', { class: 'data preview' });
       var summaryLine = el('span', { class: 'muted' });
       var full = el('input', { type: 'radio', name: 'mode', value: 'replace', checked: true });
@@ -1139,9 +1302,22 @@
         })));
       }
 
+      // The columns fold away once the QR code and a name were found: the preview shows they're right.
+      var named = function () { return ['name', 'firstName', 'lastName', 'email'].some(picked); };
+      var foldNote = el('span', { class: 'fold-note' });
+      var mapFold = el('details', { class: 'howto-fold map-fold', open: !(picked('code') && named()) }, [
+        el('summary', null, [el('span', { text: 'Columns' }), foldNote]),
+        el('div', { class: 'table-wrap' }, [el('table', { class: 'data map' }, [
+          el('thead', null, [el('tr', null, [el('th', { text: 'Field' }), el('th', { text: 'Column in your file' }), el('th', { text: 'Sample values' })])]),
+          el('tbody', null, mapRows),
+        ])]),
+      ]);
+
       var sumTimer = null;
       function refresh() {
         banner.hidden = picked('code');
+        foldNote.textContent = picked('code') ? 'QR code from “' + prev.headers[mapping.code] + '”' : 'No QR code column';
+        foldNote.classList.toggle('warn', !picked('code'));
         drawPreview();
         clearTimeout(sumTimer);
         sumTimer = setTimeout(async function () {
@@ -1166,33 +1342,27 @@
           go.disabled = true;
           result.className = 'ok-text connect-result';
           result.textContent = '';
-          result.appendChild(el('span', { class: 'ok', text: '✓' }));
+          result.appendChild(el('span', { class: 'ok' }, [ico('check')]));
           result.appendChild(document.createTextNode(res.message));
           setTimeout(function () { location.hash = '#/event/' + ev.id; }, 1500);
         } catch (ex) { busy(go, false); result.className = 'error'; result.textContent = ex.message; }
       });
 
+      // Check, then import: what the guests will look like, the columns behind it, and how to import.
       body.appendChild(banner);
-      body.appendChild(el('div', { class: 'split even' }, [
-        el('div', null, [
-          el('div', { class: 'section-head' }, [el('h2', { text: 'Match the columns' })]),
-          el('div', { class: 'table-wrap' }, [el('table', { class: 'data map' }, [
-            el('thead', null, [el('tr', null, [el('th', { text: 'Field' }), el('th', { text: 'Column in your file' }), el('th', { text: 'Sample values' })])]),
-            el('tbody', null, mapRows),
-          ])]),
-        ]),
-        el('div', null, [
-          el('div', { class: 'section-head' }, [el('h2', { text: 'Preview' })]),
-          el('div', { class: 'table-wrap' }, [previewTable]),
-          el('div', { class: 'section-head gap-top' }, [el('h2', { text: 'How to import' })]),
-          fullCard, addCard,
-          el('div', { class: 'import-row' }, [go, summaryLine]),
-          result,
-        ]),
-      ]));
+      body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Preview' })]));
+      body.appendChild(el('div', { class: 'table-wrap' }, [previewTable]));
+      body.appendChild(mapFold);
+      body.appendChild(el('div', { class: 'section-head gap-top' }, [el('h2', { text: 'How to import' })]));
+      body.appendChild(fullCard);
+      body.appendChild(addCard);
+      body.appendChild(el('div', { class: 'import-row' }, [go, summaryLine]));
+      body.appendChild(result);
       refresh();
     }
     chooser();
+    // Chosen on the Add source page: straight to the columns.
+    if (pendingFile && pendingFile.id === s.id) { var chosen = pendingFile.file; pendingFile = null; readFile(chosen); }
   }
 
   // ------------------------------------------------------------------ webhooks
@@ -1339,7 +1509,7 @@
             load(false);
           } });
         } else if (t.scannedAt) {
-          action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', 'aria-label': 'Undo check-in for ' + (t.holderName || 'guest'), onclick: async function (e) {
+          action = el('button', { type: 'button', class: 'xs ghost', text: 'Undo', 'aria-label': 'Undo check-in for ' + (t.holderName || 'guest'), onclick: async function (e) {
             busy(e.currentTarget, true);
             try {
               await api('POST', '/api/admin/tickets/' + t.id + '/undo', {});
@@ -1427,24 +1597,25 @@
     if (opts && opts.fresh) stagger(tbody.children);
   }
 
-  // ---- Door: the PIN, the phones signed in, and a way to test a code
+  // ---- Door: get the staff in (link and PIN), the phones signed in, and a way to test a code
   function doorTab(box, data) {
     var ev = data.event;
     var pin = ev.doorPin || '';
     var weak = weakPin(pin);
     box.textContent = '';
+    var send = el('button', { type: 'button', class: weak ? '' : 'primary', text: 'Send to staff', onclick: function () { shareDoor(ev); } });
+    var change = el('button', { type: 'button', class: weak ? 'primary' : '', text: 'Change PIN', onclick: function () { changePin(ev); } });
     box.appendChild(el('section', { class: 'door-card' + (weak ? ' weak' : '') }, [
       el('div', { class: 'door-card-main' }, [
         el('div', { class: 'label sm', text: 'Door PIN' }),
         el('div', { class: 'pin-big', role: 'img', 'aria-label': pin ? 'Door PIN ' + pin.split('').join(' ') : 'Door PIN hidden' }, (pin || '••••').split('').map(function (d) { return el('span', { text: d }); })),
         weak ? el('p', { class: 'warn-line', text: 'Easy to guess. Anyone with the door link could try it.' }) : null,
-        el('p', { class: 'muted', text: 'Door staff open the door app on their phone and type this. Changing it doesn’t sign out phones that are already scanning.' }),
+        el('p', { class: 'muted', text: 'Staff open the door link on their phone, type this PIN and pick their door. Changing it doesn’t sign out phones already scanning.' }),
       ]),
-      el('div', { class: 'door-card-actions' }, [
-        el('button', { type: 'button', class: weak ? 'primary' : '', text: 'Change PIN', onclick: function () { changePin(ev); } }),
-        el('a', { class: 'btn', href: '/', target: '_blank', rel: 'noopener', text: 'Open door app' }),
-        el('button', { type: 'button', text: 'Send to staff', title: 'Sends the door link and PIN', onclick: function () { shareDoor(ev); } }),
-      ]),
+      // The thing to do here is send the link; a weak PIN gets changed first.
+      el('div', { class: 'door-card-actions' }, (weak ? [change, send] : [send, change]).concat([
+        el('a', { class: 'btn', href: doorLink(ev, true), target: '_blank', rel: 'noopener', text: 'Open door app' }),
+      ])),
     ]));
 
     var phones = data.devices || [];
@@ -1483,8 +1654,10 @@
       ])]));
     }
 
-    box.appendChild(el('div', { class: 'section-head gap-top' }, [el('h2', { text: 'Test a code' })]));
-    testBlock(box, ev);
+    // Checking a code is for before doors, now and then: folded until wanted.
+    var test = el('div', { class: 'test-body' });
+    testBlock(test, ev);
+    box.appendChild(el('details', { class: 'howto-fold test-fold gap-top' }, [el('summary', { text: 'Test a code without admitting anyone' }), test]));
   }
 
   function changePin(ev) {
@@ -1501,33 +1674,43 @@
         await api('PATCH', '/api/admin/events/' + ev.id, { doorPin: input.value });
         close();
         toast('Door PIN changed. Send it to your door staff.', 0, 'ok');
-        resolveIssue('pin', function () { refreshEvent(true); });
+        refreshEvent(true);
       } catch (ex) { err.textContent = ex.message; busy(save, false); }
     } }, [field('New door PIN', input, 'Phones already scanning stay signed in.'), hint, el('div', { class: 'head-actions' }, [save]), err]), null, { small: true });
     later(260, function () { input.focus(); });
   }
 
-  // A fixed item folds away (or the whole box, if it was the last one), then the page refreshes.
-  function resolveIssue(key, then) {
-    var li = document.querySelector('.attention li[data-key="' + key + '"]');
-    if (!li || reduceMotion) { then(); return; }
-    var box = li.closest('.attention');
-    var node = box && box.querySelectorAll('li').length === 1 ? box : li;
-    node.style.setProperty('height', node.offsetHeight + 'px');
-    node.classList.add('resolving');
-    requestAnimationFrame(function () { requestAnimationFrame(function () { node.style.setProperty('height', '0px'); }); });
-    later(320, then);
+  // The door link names the event, so staff see its name on the PIN screen and land on the right list.
+  function doorLink(ev, relative) { return (relative ? '' : location.origin) + '/#e=' + encodeURIComponent(ev.id); }
+
+  // What door staff get: where to go, the PIN, and what to tap.
+  function staffMessage(ev) {
+    var d = ev.startsAt ? new Date(ev.startsAt) : null;
+    var day = d && !isNaN(d) ? d.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+    var when = [day, fmtDoors(ev.startsAt), ev.venue].filter(Boolean).join(' · ');
+    return ['Door scanner for ' + ev.name]
+      .concat(when ? [when] : [])
+      .concat(['', '1. Open ' + doorLink(ev), '2. Type the door PIN' + (ev.doorPin ? ': ' + ev.doorPin : ''), '3. Pick your door and tap Start scanning'])
+      .join('\n');
   }
 
-  // Door link and PIN in one message, through the phone's share sheet (or copied, on a laptop).
+  // Send to staff: the message on screen first, then the phone's share sheet or a copy.
   function shareDoor(ev) {
-    var link = location.origin + '/';
-    var text = 'Door app for ' + ev.name + ': ' + link + (ev.doorPin ? '\nDoor PIN: ' + ev.doorPin : '');
-    if (navigator.share) {
-      navigator.share({ title: 'Door app · ' + ev.name, text: text }).catch(function () { /* closed the share sheet */ });
-      return;
-    }
-    copyText(text, 'Copied the door link and PIN. Paste it to your door staff.');
+    var text = staffMessage(ev);
+    var body = el('div', { class: 'share' });
+    var close = modal('Send to door staff', body, null, { small: true });
+    body.appendChild(el('p', { class: 'muted', text: 'Send this to everyone scanning. Each phone shows up under Door phones once it signs in.' }));
+    body.appendChild(el('div', { class: 'share-preview', text: text }));
+    var copy = el('button', { type: 'button', class: 'lg' + (navigator.share ? '' : ' primary'), text: 'Copy message', onclick: function () {
+      copyText(text, 'Copied. Paste it to your door staff.');
+      close();
+    } });
+    var actions = [copy];
+    if (navigator.share) actions.push(el('button', { type: 'button', class: 'lg primary', text: 'Share…', onclick: function () {
+      navigator.share({ title: 'Door scanner · ' + ev.name, text: text }).then(close, function () { /* closed the share sheet: stay here */ });
+    } }));
+    body.appendChild(el('div', { class: 'share-actions' + (actions.length > 1 ? ' two' : '') }, actions));
+    (navigator.share ? actions[1] : copy).focus();
   }
 
   function copyText(text, done) {
@@ -1550,7 +1733,7 @@
     var input = el('input', { class: 'search', placeholder: 'Paste or type what a QR contains', spellcheck: 'false', 'aria-label': 'Ticket code' });
     var out = el('div', { class: 'verdicts', 'aria-live': 'polite' });
     var go = el('button', { class: 'primary', type: 'submit', text: 'Check' });
-    box.appendChild(el('p', { class: 'muted tab-intro', text: 'Check a code without admitting anyone. Scan the ticket with any QR reader app and paste the text here, or type the number printed under the QR.' }));
+    box.appendChild(el('p', { class: 'muted tab-intro', text: 'Scan the ticket with any QR reader app and paste the text here, or type the number printed under the QR. Nobody gets checked in.' }));
     box.appendChild(el('form', { class: 'toolbar-row', onsubmit: async function (e) {
       e.preventDefault();
       if (!input.value.trim()) { input.focus(); return; }

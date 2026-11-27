@@ -46,6 +46,10 @@
   var targetEvent = null;        // "Pick another": the event whose PIN we're asking for
   var unlocking = false;
   var deviceChoice = load('door.deviceName');
+  // The link from Send to staff carries the event (/#e=ID): the PIN screen names it, and a phone still set up
+  // for another night asks for this event's PIN instead of opening the old list.
+  function linkFromHash() { var m = /[#&]e=([^&]+)/.exec(location.hash); try { return m ? decodeURIComponent(m[1]) : null; } catch (e) { return null; } }
+  var linkEventId = linkFromHash();
 
   // ------------------------------------------------------------------ utils
 
@@ -91,8 +95,9 @@
     var was = n.hidden || n.classList.contains('leaving');
     n.classList.remove('leaving'); n.hidden = false;
     if (!was) return;
-    n.classList.remove('fwd', 'back', 'open');
-    if (dir) n.classList.add(dir);
+    // Prefixed: plain "back" is also the Back button's class, and that one sets a height.
+    n.classList.remove('go-fwd', 'go-back', 'go-open');
+    if (dir) n.classList.add('go-' + dir);
     animateIn(n);
   }
   function wait(ms) { return new Promise(function (r) { setTimeout(r, reduceMotion ? 0 : ms); }); }
@@ -686,6 +691,8 @@
     if (!scanner) scanner = new window.DoorScanner($('video'), function (text, method) { handleCode(text, method); });
     try {
       var info = await scanner.start();
+      // Signed out or moved to another event while the camera was starting: don't leave it running.
+      if (!session || gone('scan')) { scanner.stopCamera(); return; }
       $('btn-torch').hidden = !info.torch;
       $('video').classList.add('live');
     } catch (e) {
@@ -719,8 +726,10 @@
     title.textContent = '';
     if (forEvent) { title.appendChild(document.createTextNode('Enter the PIN for')); title.appendChild(el('br')); title.appendChild(document.createTextNode(forEvent.name)); }
     else { title.appendChild(document.createTextNode('Enter tonight’s')); title.appendChild(el('br')); title.appendChild(document.createTextNode('door PIN')); }
-    $('pin-sub').textContent = forEvent ? [forEvent.venue, fmtWhen(forEvent.startsAt)].filter(Boolean).join(' · ') || 'The promoter has it on the event page.' : 'The promoter has it on the event page.';
+    $('pin-sub').textContent = forEvent ? [forEvent.venue, fmtWhen(forEvent.startsAt)].filter(Boolean).join(' · ') || 'The promoter sends it with the door link.' : 'The promoter sends it with the door link.';
   }
+
+  function linkedEvent() { return linkEventId ? doorEventsList.filter(function (e) { return e.id === linkEventId; })[0] || null : null; }
 
   async function showPin(message, forEvent, dir) {
     ['scan', 'setup', 'pick'].forEach(hide);
@@ -735,6 +744,9 @@
       doorEventsList = res.events || [];
       pinLengths = (res.pinLengths && res.pinLengths.length) ? res.pinLengths : [4];
       renderPinBoxes();
+      // Opened from the staff link: the screen names tonight's event (unless a PIN is already on its way in).
+      var linked = !forEvent && !pinValue ? linkedEvent() : null;
+      if (linked && !$('pin').hidden) { targetEvent = linked; setPinTitle(linked); }
       if (!doorEventsList.length && !message) $('pin-error').textContent = 'No events are open for scanning yet. Create one in the admin first.';
     } catch (e) {
       if (!message) $('pin-error').textContent = 'Could not reach the server. Check the connection.';
@@ -849,6 +861,8 @@
       save('door.session', session);
       save('door.deviceName', deviceChoice);
       pinValue = '';
+      // Signed in: the link's job is done, so a reload or a later sign-out starts plain.
+      if (linkEventId) { linkEventId = null; try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* old browser */ } }
       hide('setup');
       await startScanning();
     } catch (e) {
@@ -866,6 +880,8 @@
     lastAdmit = null;
     renderLastAdmit();
     $('menu-device').textContent = session.device.name;
+    $('menu-event').textContent = session.event ? session.event.name : '';
+    $('menu-event-sub').textContent = session.event ? [session.event.venue, fmtWhen(session.event.startsAt)].filter(Boolean).join(' · ') : '';
     $('btn-logout').textContent = 'Sign out of ' + session.device.name;
     applyTestMode();
     tickets.clear(); byKey.clear(); outbox.clear();
@@ -1005,7 +1021,65 @@
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     navigator.serviceWorker.register('/sw.js').catch(function () { /* offline cache unavailable */ });
   }
-  if (session && session.token) startScanning(); else showPin();
+  // Scans another night left unsent on this phone go up before the phone moves on. If that fails they
+  // stay saved for that event, the same as after any sign-out by the promoter.
+  async function sendLeftovers(old) {
+    var d = null;
+    try {
+      d = await idbOpen('door-' + old.event.id);
+      var items = await new Promise(function (resolve, reject) {
+        var req = d.transaction('outbox', 'readonly').objectStore('outbox').getAll();
+        req.onsuccess = function () { resolve(req.result || []); };
+        req.onerror = function () { reject(req.error); };
+      });
+      if (!items.length) return;
+      var ctrl = new AbortController();
+      var timer = setTimeout(function () { ctrl.abort(); }, 4000);
+      var res = await fetch('/api/door/scans', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + old.token }, body: JSON.stringify({ scans: items.slice(0, 200) }), signal: ctrl.signal, cache: 'no-store' });
+      clearTimeout(timer);
+      if (!res.ok) return;
+      var sent = ((await res.json()).results || []).map(function (r) { return r.clientScanId; });
+      await new Promise(function (resolve) { var tx = d.transaction('outbox', 'readwrite'); sent.forEach(function (k) { tx.objectStore('outbox').delete(k); }); tx.oncomplete = tx.onerror = tx.onabort = resolve; });
+    } catch (e) { /* kept on the phone */ } finally { if (d) d.close(); }
+  }
+
+  // On opening, and whenever a staff link is opened in the tab that's already here.
+  async function followLink(opening) {
+    if (session && session.token) {
+      // A link for another event than the one this phone is set up for: ask for that event's PIN,
+      // so nobody scans tonight's guests against an old list.
+      if (linkEventId && session.event && session.event.id !== linkEventId) {
+        var res = null;
+        try { res = await api('GET', '/api/door/events', null, 3000); } catch (e) { res = null; }
+        var linked = res && (res.events || []).filter(function (e) { return e.id === linkEventId; })[0];
+        if (linked && session && session.event.id !== linked.id) {
+          var old = session;
+          if (!opening) {
+            stopEverything();
+            if (db) { db.close(); db = null; }
+            tickets.clear(); byKey.clear(); outbox.clear(); recent = []; lastAdmit = null;
+          }
+          session = null;
+          save('door.session', null);
+          doorEventsList = res.events || [];
+          showPin('', linked);
+          sendLeftovers(old);
+          return;
+        }
+      }
+      if (opening) startScanning();
+      return;
+    }
+    if (opening) showPin();
+    else if (!$('pin').hidden && !pinValue && !unlocking) showPin('', null); // names the linked event
+  }
+  window.addEventListener('hashchange', function () {
+    var id = linkFromHash();
+    if (!id || id === linkEventId) return;
+    linkEventId = id;
+    followLink(false);
+  });
+  followLink(true);
 
   // Exposed for automated tests only.
   window.__door = { handleCode: handleCode, state: function () { return { tickets: tickets.size, outbox: outbox.size, online: online, cursor: cursor, counts: counts() }; } };
