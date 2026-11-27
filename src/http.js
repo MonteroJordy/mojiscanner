@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const zlib = require('node:zlib');
 
 class HttpError extends Error {
   constructor(status, message, extra) {
@@ -80,8 +81,19 @@ function send(res, status, body, headers = {}) {
   res.end(body);
 }
 
+// Text over ~1 KB goes out gzipped when the browser accepts it: door phones on venue Wi-Fi load and sync faster.
+const GZIP_MIN = 1024;
+function acceptsGzip(req) { return !!req && /\bgzip\b/.test(req.headers['accept-encoding'] || ''); }
+
 function json(res, status, obj, headers = {}) {
-  send(res, status, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+  let body = JSON.stringify(obj);
+  const h = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers };
+  if (Buffer.byteLength(body) > GZIP_MIN && acceptsGzip(res.req)) {
+    body = zlib.gzipSync(body, { level: 5 });
+    h['Content-Encoding'] = 'gzip';
+    h.Vary = 'Accept-Encoding';
+  }
+  send(res, status, body, h);
 }
 
 const TYPES = {
@@ -105,14 +117,30 @@ function serveStatic(req, res, publicDir, pathname) {
   try { stat = fs.statSync(file); } catch (_) { return false; }
   if (!stat.isFile()) return false;
   const ext = path.extname(file);
-  const etag = `"${stat.size.toString(36)}-${Math.floor(stat.mtimeMs).toString(36)}"`;
+  const type = TYPES[ext] || 'application/octet-stream';
+  const text = /^(text\/|application\/(json|manifest\+json)|image\/svg)/.test(type);
+  const gz = text && stat.size > GZIP_MIN && acceptsGzip(req);
+  // The gzipped copy is a different representation, so it gets its own ETag.
+  const etag = `"${stat.size.toString(36)}-${Math.floor(stat.mtimeMs).toString(36)}${gz ? '-gz' : ''}"`;
   // App shell must revalidate so door phones pick up new versions; the service worker caches for offline.
-  const headers = { 'Content-Type': TYPES[ext] || 'application/octet-stream', ETag: etag, 'Cache-Control': 'no-cache' };
+  const headers = { 'Content-Type': type, ETag: etag, 'Cache-Control': 'no-cache' };
+  if (text) headers.Vary = 'Accept-Encoding';
+  if (gz) headers['Content-Encoding'] = 'gzip';
   if (rel === '/sw.js') headers['Service-Worker-Allowed'] = '/';
   if (req.headers['if-none-match'] === etag) { send(res, 304, undefined, headers); return true; }
   if (req.method === 'HEAD') { send(res, 200, undefined, headers); return true; }
-  send(res, 200, fs.readFileSync(file), headers);
+  send(res, 200, gz ? gzipped(file, etag) : fs.readFileSync(file), headers);
   return true;
+}
+
+// Static files are compressed once per version and kept in memory (the app ships a handful of small files).
+const gzCache = new Map();
+function gzipped(file, etag) {
+  const hit = gzCache.get(file);
+  if (hit && hit.etag === etag) return hit.buf;
+  const buf = zlib.gzipSync(fs.readFileSync(file), { level: 9 });
+  gzCache.set(file, { etag, buf });
+  return buf;
 }
 
 function parseCookies(header) {
