@@ -102,7 +102,11 @@ label.check { display: flex; align-items: center; gap: 10px; font-size: 14.5px; 
 label.check input { width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--text); }
 /* iPhone Safari: date fields ignore width:100% and center their value unless they drop the native look. */
 input[type="datetime-local"] { -webkit-appearance: none; appearance: none; display: block; min-width: 0; text-align: left; }
-input::-webkit-date-and-time-value { text-align: left; }
+input::-webkit-date-and-time-value { text-align: left; margin: 0; }
+/* iPhone lays date fields out as flex inside; keeping that puts the date in the middle of the field, not at the top. */
+@supports (-webkit-touch-callout: none) {
+  input[type="datetime-local"] { display: flex; align-items: center; }
+}
 
 .badge { display: inline-block; font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; padding: 5px 9px; border-radius: 6px; border: 1.5px solid var(--text); color: var(--text); white-space: nowrap; line-height: 1.2; }
 .tag { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; padding: 5px 9px; border-radius: 6px; white-space: nowrap; line-height: 1.2; border: 1.5px solid transparent; }
@@ -387,6 +391,36 @@ body.door { overflow: hidden; height: 100%; }
 .d-ask:not([hidden]) .d-ask-sheet { animation: d-sheet .3s cubic-bezier(.2, .8, .2, 1) both; }
 .last-admit:not([hidden]) { animation: d-in .3s cubic-bezier(.2, .8, .2, 1) both; }
 
+/* Screens move the way you're going: the next step comes in from the right, going back from the left,
+   and the scanner opens like a camera. */
+@keyframes d-fwd { from { opacity: 0; transform: translateX(36px); } to { opacity: 1; transform: none; } }
+@keyframes d-back { from { opacity: 0; transform: translateX(-36px); } to { opacity: 1; transform: none; } }
+@keyframes d-open { from { opacity: 0; transform: scale(1.05); } to { opacity: 1; transform: none; } }
+.door-screen:not(.page).enter.fwd > .d-col { animation: d-fwd .34s var(--ease-out) both; }
+.door-screen:not(.page).enter.back > .d-col { animation: d-back .34s var(--ease-out) both; }
+#scan.enter.open > .scan-ui { animation: d-open .42s var(--ease-out) both; }
+#video { opacity: 0; transition: opacity .45s ease; }
+#video.live { opacity: 1; }
+/* The right PIN: the dots go green for a beat before the next step. */
+@keyframes d-ok { 0% { transform: scale(1); } 45% { transform: scale(1.35); } 100% { transform: scale(1); } }
+.pin-boxes.ok .pin-box { border-color: var(--ok); transition: border-color .12s ease; }
+.pin-boxes.ok .pin-box.filled::after { background: var(--ok); animation: d-ok .26s var(--ease-out); }
+/* A result's color spreads from where it came from: the scan frame, or the button just tapped.
+   The check and the cross draw themselves in. */
+@keyframes d-flood { from { clip-path: circle(0 at var(--fx, 50%) var(--fy, 45%)); } to { clip-path: circle(150vmax at var(--fx, 50%) var(--fy, 45%)); } }
+.result.enter { animation: d-flood .3s cubic-bezier(.3, .7, .2, 1) backwards; }
+.r-glyph svg { width: 62%; height: 62%; overflow: visible; }
+.r-glyph svg path { fill: none; stroke: currentColor; stroke-width: 3.4; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 0; }
+@keyframes d-draw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+.result.enter .r-glyph svg path { animation: d-draw .3s .12s cubic-bezier(.6, 0, .25, 1) backwards; }
+/* Last check-in: a new name swaps in, Undo slides the card away. The count steps down too. */
+@keyframes d-swap { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.la-text.swap { animation: d-swap .28s var(--ease-out); }
+@keyframes d-la-out { to { opacity: 0; transform: translateY(10px) scale(.98); } }
+@keyframes d-tick-down { 0% { transform: none; } 35% { transform: translateY(3px) scale(.9); color: var(--warn); } 100% { transform: none; } }
+.cc-count .n.tick-down { animation: d-tick-down .45s var(--ease-out); }
+.net.loading .ind { animation: live-pulse 1.1s ease-in-out infinite; }
+
 /* Leaving: pages drop away, results fade, so nothing just blinks out. Nothing that's leaving takes taps. */
 @keyframes d-sheet-out { to { opacity: 0; transform: translateY(44px); } }
 @keyframes d-fade-out { to { opacity: 0; } }
@@ -395,6 +429,7 @@ body.door { overflow: hidden; height: 100%; }
 .d-ask.leaving { animation: d-fade-out .2s ease both; pointer-events: none; }
 .d-ask.leaving .d-ask-sheet { animation: d-sheet-out .2s var(--ease-in) both; }
 .test-sheet.leaving { animation: d-sheet-out .2s var(--ease-in) both; }
+.last-admit.leaving { animation: d-la-out .2s var(--ease-in) both; pointer-events: none; }
 /* The count ticks up when someone gets in. */
 @keyframes d-tick { 0% { transform: none; } 35% { transform: translateY(-3px) scale(1.12); color: var(--ok); } 100% { transform: none; } }
 .cc-count .n { display: inline-block; transform-origin: 50% 80%; }
@@ -872,6 +907,22 @@ button.busy:disabled { opacity: .85; cursor: progress; }
 .connect-result .ok { animation: pop .4s var(--ease-spring) both; }
 .pick, .radio-card, .seg button, .verdict { transition: border-color .2s ease, background-color .2s ease, color .2s ease, transform .1s ease; }
 .pick:active, .radio-card:active { transform: scale(.98); }
+/* Toasts say how it went: a check when it worked, a red mark when it didn't. */
+.toast.ok, .toast.bad { display: flex; align-items: center; gap: 10px; text-align: left; }
+.toast.ok::before, .toast.bad::before { flex: none; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 900; line-height: 1; animation: pop .4s .08s var(--ease-spring) both; }
+.toast.ok::before { content: '✓'; background: var(--ok); color: var(--ok-ink); }
+.toast.bad::before { content: '!'; background: var(--dup); color: #fff; }
+.toast.bad { border-color: #5b2226; }
+/* Wrong password: the form shakes, like the door PIN. */
+.admin-login form.shake { animation: shake .38s; }
+/* A fixed problem folds away instead of vanishing on the next refresh. */
+.resolving { overflow: hidden; opacity: 0; padding-top: 0 !important; padding-bottom: 0 !important; margin-top: 0 !important; margin-bottom: 0 !important; border-color: transparent !important; transition: height .3s var(--ease-out), opacity .18s ease, padding .3s var(--ease-out), margin .3s var(--ease-out), border-color .2s ease; }
+/* Scans tab: a new scan slides in at the top and glows once. */
+@keyframes arrive { from { opacity: 0; background-color: rgba(43, 212, 106, .22); } 30% { opacity: 1; } to { background-color: transparent; } }
+table.data tr.arrive td { animation: arrive 1.4s var(--ease-out) both; }
+@media (max-width: 600px) { table.data.scans tr.arrive { animation: arrive 1.4s var(--ease-out) both; } table.data.scans tr.arrive td { animation: none; } }
+/* Admitted or undone in the list: the status dot pops as the row glows. */
+tr.flash .state .dot { animation: pop .45s var(--ease-spring) both; }
 
 @media (max-width: 900px) {
   /* Top bar stays put and blurs what scrolls under it. */
