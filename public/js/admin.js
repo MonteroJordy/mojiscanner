@@ -391,7 +391,10 @@
     function down(err) {
       paintDots('bad');
       body.textContent = '';
-      body.appendChild(hero('bad', 'Can\'t reach the server', err && err.message ? err.message : null));
+      // The browser's own words ("Failed to fetch", "Load failed") mean nothing at the door.
+      var why = !err ? null : !err.status ? 'No answer. This device may be offline, or the server is down.'
+        : err.status >= 500 ? 'The server isn\'t answering (error ' + err.status + ').' : err.message;
+      body.appendChild(hero('bad', 'Can\'t reach the server', why));
       body.appendChild(el('section', { class: 'status-help' }, [
         el('h2', { text: 'What to do' }),
         el('ol', { class: 'howto' }, [
@@ -452,8 +455,8 @@
           el('span', { class: 'muted', text: !ph.signedIn ? 'None signed in' : n(ph.signedIn) + ' signed in' + (e.phase === 'doors' ? ' · ' + n(ph.active) + ' active now' : '') }),
           el('span', { class: 'num', text: ph.list.map(function (d) { return d.name; }).join(', ') }),
         ]));
-        body.appendChild(el('section', { class: 'ev-status ' + lvl }, [
-          el('a', { class: 'ev-status-head', href: '#/event/' + e.id }, [
+        body.appendChild(el('section', { class: 'st-event ' + lvl }, [
+          el('a', { class: 'st-event-head', href: '#/event/' + e.id }, [
             el('span', { class: 'sdot ' + lvl, 'aria-hidden': 'true' }),
             el('div', { class: 'evs-name' }, [el('strong', { text: e.name }), el('span', { class: 'muted', text: [e.venue, fmtDoors(e.startsAt)].filter(Boolean).join(' · ') })]),
             el('span', { class: 'evs-count', text: n(e.checkedIn) + ' in / ' + n(e.valid) }),
