@@ -26,6 +26,7 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
   const loginLimiter = rateLimiter({ windowMs: 10 * 60e3, max: 10 });
   const pinLimiter = rateLimiter({ windowMs: 5 * 60e3, max: 8 });
   const eventPinLimiter = rateLimiter({ windowMs: 15 * 60e3, max: 40 }); // caps guessing from many IPs
+  const unlockLimiter = rateLimiter({ windowMs: 15 * 60e3, max: 60 }); // PIN-first sign-in: caps guessing across every event
   const lastSeen = new Map();
 
   // ---------- helpers ----------
@@ -494,14 +495,55 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
 
   // ---------- door app ----------
 
-  router.get('/api/door/events', async (req, res) => {
-    // Door staff only need tonight's and upcoming events: hide ones that started more than 16 hours ago.
+  // Door staff only need tonight's and upcoming events: hide ones that started more than 16 hours ago.
+  function doorEvents() {
     const cutoff = new Date(Date.now() - 16 * 3600e3).toISOString();
-    const rows = db.all(
-      `SELECT id, name, venue, starts_at FROM events
+    return db.all(
+      `SELECT id, name, venue, starts_at, door_pin_hash, door_pin_enc FROM events
         WHERE archived = 0 AND door_pin_hash IS NOT NULL AND (starts_at IS NULL OR starts_at >= ?)
         ORDER BY starts_at IS NULL, starts_at ASC LIMIT 50`, cutoff);
-    json(res, 200, { events: rows.map((r) => ({ id: r.id, name: r.name, venue: r.venue || null, startsAt: r.starts_at })) });
+  }
+
+  function storedPin(e) {
+    if (!e.door_pin_enc) return null;
+    try { return String(crypto.decryptJson(e.door_pin_enc).pin || '') || null; } catch (_) { return null; }
+  }
+
+  function pinMatches(e, pin) {
+    const plain = storedPin(e);
+    return plain ? safeEqual(plain, pin) : verifyPin(pin, e.door_pin_hash);
+  }
+
+  router.get('/api/door/events', async (req, res) => {
+    const rows = doorEvents();
+    // How many digits to wait for before trying the PIN. Only the lengths, never which event has which.
+    const lengths = new Set(rows.map((r) => (storedPin(r) || '').length).filter((n) => n >= 4));
+    json(res, 200, {
+      events: rows.map((r) => ({ id: r.id, name: r.name, venue: r.venue || null, startsAt: r.starts_at })),
+      pinLengths: lengths.size ? [...lengths].sort((a, b) => a - b) : [4],
+    });
+  });
+
+  // PIN first: the door PIN alone finds tonight's event(s). Sign-in itself still goes through /api/door/login.
+  router.post('/api/door/unlock', async (req, res) => {
+    const body = await readJson(req);
+    const pin = str(body.pin, 32);
+    const ipKey = `${clientIp(req)}|unlock`;
+    if (pinLimiter.blocked(ipKey)) throw new HttpError(429, 'Too many wrong PINs. Wait 5 minutes.');
+    if (unlockLimiter.blocked('all')) throw new HttpError(429, 'Too many wrong PINs. Wait 15 minutes.');
+    const matched = /^\d{4,12}$/.test(pin) ? doorEvents().filter((e) => pinMatches(e, pin)) : [];
+    if (!matched.length) {
+      pinLimiter.fail(ipKey);
+      unlockLimiter.fail('all');
+      throw new HttpError(401, 'Wrong PIN');
+    }
+    json(res, 200, {
+      events: matched.map((e) => {
+        const st = tickets.stats(db, e.id);
+        const platforms = db.get('SELECT COUNT(DISTINCT platform) AS n FROM sources WHERE event_id = ? AND removed = 0', e.id).n;
+        return { id: e.id, name: e.name, venue: e.venue || null, startsAt: e.starts_at, tickets: st.valid, platforms };
+      }),
+    });
   });
 
   router.post('/api/door/login', async (req, res) => {
