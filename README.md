@@ -47,11 +47,11 @@ Any host that runs Docker and keeps a disk works the same way (Render with a dis
 
 ## Night-of checklist
 
-1. **Day before:** create the event and door PIN, connect every source, check each source's count matches that platform's dashboard.
-2. **Test:** buy one ticket per platform (activate the DICE one in the app). In the admin, *Test a code* (or in the door app, More → Test mode) shows what the QR contains and whether it matches.
-3. **An hour before doors:** re-upload RA and Bucket Listers exports as "full current list", and the Posh CSV. API sources keep syncing on their own.
-4. **At the door:** each phone types the door PIN on the keypad. The PIN finds tonight's event, so give every event its own PIN; if two shows share one, the phone asks which. Pick which door the phone is (Door 1, Door 2, VIP, Box office) and tap Start scanning. Open it once with signal so the list downloads. After that it works offline, and it skips straight to scanning next time.
-5. **After:** Export → Tickets CSV gives platform, ticket type and checked-in time for every ticket.
+1. **Day before:** create the event and door PIN, then add every source. The event page's *Ready for doors* list shows what's left: lists to upload or fix, then the door staff. Check each source's count matches that platform's dashboard.
+2. **Test:** buy one ticket per platform (activate the DICE one in the app). On the event's Door tab, *Test a code* (or in the door app, More → Test mode) shows what the QR contains and whether it matches.
+3. **An hour before doors:** re-upload RA and Bucket Listers exports as "full list", and the Posh CSV. The event page flags any list uploaded more than an hour ago. API sources keep syncing on their own.
+4. **Door staff:** *Send to staff* (event page or Door tab) gives you one message to paste or share: the door link, the PIN and what to tap. The link opens the door app on that event, so a phone still set up for another night asks for this event's PIN instead. Staff type the PIN, pick which door the phone is (Door 1, Door 2, VIP, Box office) and tap Start scanning. Open it once with signal so the list downloads. After that it works offline, and it skips straight to scanning next time.
+5. **After:** once the night is over, the event page has the guest list and scan log as CSV downloads (platform, ticket type and checked-in time for every ticket).
 
 ## What the door sees
 
