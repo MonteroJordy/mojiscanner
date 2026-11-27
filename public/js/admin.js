@@ -269,6 +269,8 @@
   // The sidebar layout every signed-in page uses. depth: 0 events, 1 an event, 2 a page inside an event.
   // Going deeper slides the page in from the right, going back from the left.
   var lastDepth = 0;
+  async function signOut() { await api('POST', '/api/admin/logout', {}); renderLogin(); }
+
   function shell(depth, active) {
     clearInterval(refreshTimer);
     depth = depth || 0;
@@ -285,10 +287,12 @@
         el('a', { class: 'nav nav-door', href: '/', target: '_blank', rel: 'noopener', text: 'Door app' }),
         el('div', { class: 'me' }, [
           el('div', { class: 'n', text: 'Moji Sounds' }),
-          el('button', { type: 'button', class: 'text-btn', text: 'Sign out', onclick: async function () { await api('POST', '/api/admin/logout', {}); renderLogin(); } }),
+          el('button', { type: 'button', class: 'text-btn', text: 'Sign out', onclick: signOut }),
         ]),
       ]),
       main,
+      // On phones the top bar holds the logo, Events, Status and Door app; Sign out waits at the bottom.
+      el('div', { class: 'm-signout' }, [el('button', { type: 'button', class: 'text-btn', text: 'Sign out of Moji Sounds', onclick: signOut })]),
     ]));
     if (toTop) { window.scrollTo(0, 0); toTop = false; }
     startStatusPoll();
@@ -612,7 +616,7 @@
   }
 
   function eventForm(ev, onSaved) {
-    var name = el('input', { required: true, maxlength: 120, value: ev ? ev.name : '', placeholder: 'MOJI & FRQNC Present: LIGHTLEAK' });
+    var name = el('input', { required: true, maxlength: 120, value: ev ? ev.name : '', placeholder: 'Moji: Riva Starr' });
     var venue = el('input', { maxlength: 120, value: ev ? ev.venue || '' : '', placeholder: 'Edge Miami' });
     var when = el('input', { type: 'datetime-local', value: ev ? toLocalInput(ev.startsAt) : '' });
     var pin = el('input', { inputmode: 'numeric', pattern: '[0-9]*', minlength: 4, maxlength: 12, required: !ev, placeholder: ev ? 'Leave empty to keep it' : '4 to 12 digits', autocomplete: 'off' });
@@ -1272,7 +1276,7 @@
         parts.push(el('label', { class: 'check' }, [inputs.includeCohosted, 'I\'m a co-host of this Shotgun event (not the main organizer)']));
       } else if (platform === 'dice') {
         inputs.token = secret();
-        inputs.eventId = el('input', { value: settings.eventId || '', required: true, placeholder: 'Pick below or paste the DICE event ID' });
+        inputs.eventId = el('input', { value: settings.eventId || '', required: true, placeholder: 'Paste the DICE event ID' });
         var pick = el('select', { hidden: true });
         var loadBtn = el('button', { type: 'button', class: 'sm', text: 'Load my DICE events', onclick: async function () {
           loadBtn.disabled = true; err.textContent = '';
@@ -1550,7 +1554,7 @@
       body.appendChild(el('div', { class: 'callout' }, ['Point at fields in the payload. Use ', el('code', { text: 'tickets[]' }), ' for lists and ', el('code', { text: '$.order.email' }), ' for fields outside the ticket list. ', data.mapping ? '' : 'Pre-filled with a best guess: check the QR field.']));
       body.appendChild(el('div', { class: 'mapping-grid' }, Object.keys(labels).map(function (k) { return field(labels[k], inputs[k]); })));
       var result = el('p');
-      body.appendChild(el('button', { class: 'primary', type: 'button', text: 'Save mapping and import stored webhooks', onclick: async function () {
+      body.appendChild(el('button', { class: 'primary', type: 'button', text: 'Save and import', onclick: async function () {
         var mapping = {};
         Object.keys(inputs).forEach(function (k) { mapping[k] = inputs[k].value.trim(); });
         try {
@@ -1606,7 +1610,7 @@
       box.appendChild(el('p', { class: 'muted empty-line', text: data.sources.length ? 'No tickets yet. They show up here as soon as a source brings some in.' : 'No tickets yet. Add where this event sold tickets (Overview → Add source) and they show up here.' }));
       return;
     }
-    var q = el('input', { class: 'search', type: 'search', placeholder: 'Search name, email or ticket code', 'aria-label': 'Search tickets' });
+    var q = el('input', { class: 'search', type: 'search', placeholder: 'Name, email or code', 'aria-label': 'Search tickets by name, email or ticket code' });
     var status = (view && view.filter) || '';
     if (view) view.filter = '';
     var segs = segsFrom(rows);
@@ -1971,7 +1975,7 @@
   }
 
   function testBlock(box, ev) {
-    var input = el('input', { class: 'search', placeholder: 'Paste or type what a QR contains', spellcheck: 'false', 'aria-label': 'Ticket code' });
+    var input = el('input', { class: 'search', placeholder: 'What the QR contains', spellcheck: 'false', 'aria-label': 'Ticket code' });
     var out = el('div', { class: 'verdicts', 'aria-live': 'polite' });
     var go = el('button', { class: 'primary', type: 'submit', text: 'Check' });
     box.appendChild(el('p', { class: 'muted tab-intro', text: 'Scan the ticket with any QR reader app and paste the text here, or type the number printed under the QR. Nobody gets checked in.' }));

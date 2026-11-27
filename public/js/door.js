@@ -1003,6 +1003,10 @@
     $('start-btn').addEventListener('click', startFromSetup);
     $('own-name').addEventListener('input', function (e) { ownName = e.target.value; renderDoorGrid(); });
     $('own-name').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
+    // The keyboard covers the bottom half: once it's up, bring the name box into the part that's left.
+    function ownInView() { var o = $('own-name'); if (document.activeElement === o) { try { o.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' }); } catch (e) { o.scrollIntoView(); } } }
+    $('own-name').addEventListener('focus', function () { setTimeout(ownInView, 350); });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', function () { setTimeout(ownInView, 60); });
     $('pick-another').addEventListener('click', function () { showPick(); });
     $('pick-close').addEventListener('click', function () { showSetup('back'); });
 
