@@ -8,6 +8,7 @@ const { parseCsv, suggestMapping, rowsToTickets, toCsv } = require('./csv');
 const { createSyncer, PLATFORMS, summarize } = require('./sync');
 const dice = require('./connectors/dice');
 const webhook = require('./connectors/webhook');
+const status = require('./status');
 
 const ADMIN_COOKIE = 'ds_admin';
 const ADMIN_TTL = 12 * 3600;
@@ -22,6 +23,7 @@ const API_FIELDS = {
 
 function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = console, syncPageDelayMs }) {
   const router = new Router();
+  const bootedAt = Date.now();
   const syncer = createSyncer({ db, crypto, config, fetchImpl, log, pageDelayMs: syncPageDelayMs });
   const loginLimiter = rateLimiter({ windowMs: 10 * 60e3, max: 10 });
   const pinLimiter = rateLimiter({ windowMs: 5 * 60e3, max: 8 });
@@ -89,10 +91,29 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
     return s;
   }
 
+  // The names a door phone picks from when it signs in. Each event can have its own; otherwise these four.
+  const DEFAULT_DOOR_NAMES = ['Door 1', 'Door 2', 'VIP', 'Box office'];
+  function customDoorNames(e) {
+    try { const v = JSON.parse(e.door_names || 'null'); return Array.isArray(v) && v.length ? v : null; } catch (_) { return null; }
+  }
+  function doorNamesOf(e) { return customDoorNames(e) || DEFAULT_DOOR_NAMES.slice(); }
+  // Up to 8 names of up to 24 characters, no blanks or repeats. The standard four are stored as "none".
+  function checkDoorNames(list) {
+    if (!Array.isArray(list)) throw new HttpError(400, 'Door names must be a list');
+    const out = [];
+    for (const raw of list) {
+      const name = str(raw, 60).replace(/\s+/g, ' ').slice(0, 24).trim();
+      if (name && !out.some((x) => x.toLowerCase() === name.toLowerCase())) out.push(name);
+    }
+    if (!out.length) throw new HttpError(400, 'Add at least one door name');
+    if (out.length > 8) throw new HttpError(400, 'Up to 8 door names');
+    return out.join('\n') === DEFAULT_DOOR_NAMES.join('\n') ? null : out;
+  }
+
   function eventView(e) {
     let doorPin = null;
     if (e.door_pin_enc) { try { doorPin = crypto.decryptJson(e.door_pin_enc).pin || null; } catch (_) { doorPin = null; } }
-    return { id: e.id, name: e.name, venue: e.venue || null, startsAt: e.starts_at, archived: !!e.archived, hasPin: !!e.door_pin_hash, doorPin, createdAt: e.created_at };
+    return { id: e.id, name: e.name, venue: e.venue || null, startsAt: e.starts_at, archived: !!e.archived, hasPin: !!e.door_pin_hash, doorPin, doorNames: doorNamesOf(e), customDoorNames: !!customDoorNames(e), createdAt: e.created_at };
   }
 
   function setPin(eventId, pin) {
@@ -231,6 +252,10 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
     if (body.venue !== undefined) db.run('UPDATE events SET venue = ? WHERE id = ?', str(body.venue, 120) || null, e.id);
     if (body.doorPin) setPin(e.id, checkPin(body.doorPin));
     if (body.archived !== undefined) db.run('UPDATE events SET archived = ? WHERE id = ?', body.archived ? 1 : 0, e.id);
+    if (body.doorNames !== undefined) {
+      const names = body.doorNames === null ? null : checkDoorNames(body.doorNames);
+      db.run('UPDATE events SET door_names = ? WHERE id = ?', names ? JSON.stringify(names) : null, e.id);
+    }
     json(res, 200, { event: eventView(getEvent(e.id)) });
   });
 
@@ -499,7 +524,7 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
   function doorEvents() {
     const cutoff = new Date(Date.now() - 16 * 3600e3).toISOString();
     return db.all(
-      `SELECT id, name, venue, starts_at, door_pin_hash, door_pin_enc FROM events
+      `SELECT id, name, venue, starts_at, door_pin_hash, door_pin_enc, door_names FROM events
         WHERE archived = 0 AND door_pin_hash IS NOT NULL AND (starts_at IS NULL OR starts_at >= ?)
         ORDER BY starts_at IS NULL, starts_at ASC LIMIT 50`, cutoff);
   }
@@ -541,7 +566,7 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
       events: matched.map((e) => {
         const st = tickets.stats(db, e.id);
         const platforms = db.get('SELECT COUNT(DISTINCT platform) AS n FROM sources WHERE event_id = ? AND removed = 0', e.id).n;
-        return { id: e.id, name: e.name, venue: e.venue || null, startsAt: e.starts_at, tickets: st.valid, platforms };
+        return { id: e.id, name: e.name, venue: e.venue || null, startsAt: e.starts_at, tickets: st.valid, platforms, doorNames: doorNamesOf(e) };
       }),
     });
   });
@@ -633,6 +658,31 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
   });
 
   router.get('/healthz', async (req, res) => json(res, 200, { ok: true }));
+
+  // ---------- is everything running? ----------
+
+  // Public and tiny, for uptime checks: 200 when the server can serve the door, 503 when it can't.
+  // needsYou / toCheck are counts from the Status page (no names), kept for 10 seconds.
+  let countsAt = 0;
+  let countsCache = null;
+  router.get('/api/health', async (req, res) => {
+    const h = status.health({ db, syncer, config, bootedAt });
+    if (h.db === 'ok') {
+      const now = Date.now();
+      if (!countsCache || now - countsAt > 10e3) {
+        try { countsCache = status.counts(status.status({ db, syncer, config, crypto: null, bootedAt, now })); } catch (_) { countsCache = null; }
+        countsAt = now;
+      }
+      if (countsCache) Object.assign(h, countsCache);
+    }
+    json(res, h.ok ? 200 : 503, h);
+  });
+
+  // The admin's Status page: every check, with what to do about it.
+  router.get('/api/admin/status', async (req, res) => {
+    requireAdmin(req);
+    json(res, 200, status.status({ db, syncer, config, crypto, bootedAt }));
+  });
 
   // ---------- server ----------
 

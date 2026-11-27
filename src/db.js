@@ -104,6 +104,10 @@ const MIGRATIONS = [
   ALTER TABLE events ADD COLUMN venue TEXT;
   ALTER TABLE events ADD COLUMN door_pin_enc TEXT;
   `,
+  // 3: the names door phones pick from when they sign in (a JSON list; empty means the standard four)
+  `
+  ALTER TABLE events ADD COLUMN door_names TEXT;
+  `,
 ];
 
 function openDb(fileOrMemory) {

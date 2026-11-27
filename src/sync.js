@@ -106,9 +106,14 @@ function createSyncer({ db, crypto, config, fetchImpl = globalThis.fetch, log = 
     }
   }
 
+  // When the loop last woke up: the Status page and /api/health use it to tell a stalled loop from a quiet one.
+  let lastTickAt = null;
+  let busySince = null; // a round that never finishes (a platform that never answers) shows up as stuck
   async function tick() {
+    lastTickAt = Date.now();
     if (ticking) return;
     ticking = true;
+    busySince = lastTickAt;
     try {
       const now = Date.now();
       const due = db.all(
@@ -124,6 +129,7 @@ function createSyncer({ db, crypto, config, fetchImpl = globalThis.fetch, log = 
       if (log && log.error) log.error('[sync] scheduler error', err);
     } finally {
       ticking = false;
+      busySince = null;
     }
   }
 
@@ -196,7 +202,9 @@ function createSyncer({ db, crypto, config, fetchImpl = globalThis.fetch, log = 
     return { ok: true, message, stats };
   }
 
-  return { runSource, tick, start, stop, receiveWebhook, reprocessWebhooks, recheck, isRunning: (id) => running.has(id) };
+  function health() { return { lastTickAt, busySince, running: running.size, started: !!timer }; }
+
+  return { runSource, tick, start, stop, receiveWebhook, reprocessWebhooks, recheck, isRunning: (id) => running.has(id), health };
 }
 
 module.exports = { createSyncer, PLATFORMS, summarize, isLive, maskSecrets, plainLead };
