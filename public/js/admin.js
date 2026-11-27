@@ -44,12 +44,18 @@
       if (typeof body === 'string') { payload = body; headers['Content-Type'] = opts.contentType || 'text/plain; charset=utf-8'; }
       else { payload = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
     }
-    var res = await fetch(path, { method: method, headers: headers, body: payload, credentials: 'same-origin', cache: 'no-store' });
+    loading(1);
+    var res;
+    try { res = await fetch(path, { method: method, headers: headers, body: payload, credentials: 'same-origin', cache: 'no-store' }); }
+    finally { loading(-1); }
     var data = await res.json().catch(function () { return {}; });
     if (res.status === 401 && !opts.allow401) { renderLogin(); throw new Error('Sign in again'); }
     if (!res.ok) { var err = new Error(data.error || 'HTTP ' + res.status); err.status = res.status; throw err; }
     return data;
   }
+
+  var inFlight = 0;
+  function loading(d) { inFlight = Math.max(0, inFlight + d); document.body.classList.toggle('loading', inFlight > 0); }
 
   function fmtDate(iso) {
     if (!iso) return '';
@@ -81,6 +87,13 @@
     return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
   function fromLocalInput(v) { return v ? new Date(v).toISOString() : null; }
+  // "Today 8:57 PM" or "Nov 25, 8:57 PM": short enough for one line on a phone.
+  function fmtStamp(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d)) return '';
+    return (d.toDateString() === new Date().toDateString() ? 'Today ' : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ') + fmtClock(iso);
+  }
   function n(x) { return Number(x || 0).toLocaleString(); }
   function platformName(p) { return (PLATFORMS[p] || {}).name || p; }
   function isMadeUp(code) { return /^NOQR-/.test(code || ''); }
@@ -95,20 +108,43 @@
     toastTimer = setTimeout(function () { t.hidden = true; }, ms || 4000);
   }
 
-  function modal(title, body, onClose) {
+  // opts: { small, noClose, alert }. Pop-ups can stack (a confirm over the Edit sheet): Escape closes the top one.
+  function modal(title, body, onClose, opts) {
+    opts = opts || {};
     var back = el('div', { class: 'modal-back' });
-    function close() { back.remove(); document.removeEventListener('keydown', esc); if (onClose) onClose(); }
-    function esc(e) { if (e.key === 'Escape') close(); }
-    var box = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title }, [
-      el('header', null, [el('h2', { text: title }), el('button', { type: 'button', class: 'ghost sm', text: 'Close', onclick: close })]),
+    function close() {
+      back.remove();
+      document.body.classList.toggle('modal-open', !!document.querySelector('.modal-back'));
+      document.removeEventListener('keydown', esc);
+      if (onClose) onClose();
+    }
+    function esc(e) { var all = document.querySelectorAll('.modal-back'); if (e.key === 'Escape' && all[all.length - 1] === back) close(); }
+    var box = el('div', { class: 'modal' + (opts.small ? ' small' : ''), role: opts.alert ? 'alertdialog' : 'dialog', 'aria-modal': 'true', 'aria-label': title }, [
+      el('header', null, [el('h2', { text: title }), opts.noClose ? null : el('button', { type: 'button', class: 'ghost sm', text: 'Close', onclick: close })]),
       body,
     ]);
     back.appendChild(box);
     back.addEventListener('mousedown', function (e) { if (e.target === back) close(); });
     document.addEventListener('keydown', esc);
     document.body.appendChild(back);
+    document.body.classList.add('modal-open');
     return close;
   }
+
+  // In-app confirm: a sheet on phones, a small dialog on laptops. Resolves true only on the action button.
+  function ask(title, text, yes, danger) {
+    return new Promise(function (resolve) {
+      var answered = false;
+      function answer(v) { if (answered) return; answered = true; close(); resolve(v); }
+      var no = el('button', { type: 'button', class: 'lg', text: 'Cancel', onclick: function () { answer(false); } });
+      var go = el('button', { type: 'button', class: 'lg ' + (danger ? 'danger solid' : 'primary'), text: yes, onclick: function () { answer(true); } });
+      var close = modal(title, el('div', { class: 'ask' }, [el('p', { text: text }), el('div', { class: 'ask-actions' }, [no, go])]),
+        function () { if (!answered) { answered = true; resolve(false); } }, { small: true, noClose: true, alert: true });
+      (danger ? no : go).focus();
+    });
+  }
+
+  function plural(count, one, many) { return n(count) + ' ' + (count === 1 ? one : many); }
 
   function field(label, input, hint) {
     return el('label', { class: 'field' }, [el('span', { class: 'label', text: label }), input, hint ? el('small', { text: hint }) : null]);
@@ -155,14 +191,19 @@
       ]),
       main,
     ]));
+    if (toTop) { window.scrollTo(0, 0); toTop = false; }
     return main;
   }
 
   // ------------------------------------------------------------------ routing
 
+  var shownHash = null;
+  var toTop = false;
   function route() {
     clearInterval(refreshTimer);
     var h = location.hash;
+    // A new page opens at the top; re-rendering the same page (after Sync, Remove…) keeps the scroll.
+    if (h !== shownHash) { toTop = true; shownHash = h; }
     var m;
     if ((m = /^#\/event\/([^/]+)\/add$/.exec(h))) return renderAddSource(m[1]);
     if ((m = /^#\/event\/([^/]+)\/upload\/([^/]+)$/.exec(h))) return renderUpload(m[1], m[2]);
@@ -243,7 +284,8 @@
       var e = x.e;
       var st = x.st;
       var hasTickets = e.valid || e.scanned;
-      return el('a', { class: 'ev-row' + (st[2] === 0 ? ' live' : '') + (st[2] >= 3 ? ' past' : ''), href: '#/event/' + e.id }, [
+      var bare = !hasTickets && !(e.platforms && e.platforms.length); // phones show "No sources yet" once, not twice
+      return el('a', { class: 'ev-row' + (st[2] === 0 ? ' live' : '') + (st[2] >= 3 ? ' past' : '') + (bare ? ' bare' : ''), href: '#/event/' + e.id }, [
         el('div', { class: 'ev-name' }, [el('strong', { text: e.name }), el('span', { class: 'sub', text: e.venue || 'No venue set' })]),
         el('div', { class: 'ev-when' }, [el('span', { text: e.startsAt ? fmtDate(e.startsAt) : 'No date' }), e.startsAt ? el('span', { class: 'sub', text: fmtDoors(e.startsAt) }) : null]),
         el('div', { class: 'ev-status' }, [el('span', { class: 'tag ' + st[0], text: st[1] })]),
@@ -271,15 +313,17 @@
       el('div', { class: 'form-grid' }, [field('Doors open', when), field(ev ? 'New door PIN' : 'Door PIN', pin, 'Door staff type this to sign in.')]),
     ];
     if (ev) parts.push(el('label', { class: 'check' }, [archived, 'Archived: hidden from the door app, and API syncing stops']));
-    parts.push(el('div', { class: 'head-actions' }, [
-      el('button', { class: 'primary', type: 'submit', text: ev ? 'Save' : 'Create event' }),
-      ev ? el('button', { type: 'button', class: 'danger', text: 'Sign out all door phones', onclick: async function () {
-        if (!confirm('Sign out every phone scanning this event? They will need the PIN again.')) return;
-        var r = await api('POST', '/api/admin/events/' + ev.id + '/signout-devices', {});
-        toast(r.signedOut + ' phone(s) signed out');
-      } }) : null,
-    ]));
+    parts.push(el('div', { class: 'head-actions' }, [el('button', { class: 'primary', type: 'submit', text: ev ? 'Save' : 'Create event' })]));
     parts.push(err);
+    // Kept away from Save: it kicks every door phone back to the PIN screen.
+    if (ev) parts.push(el('div', { class: 'form-foot' }, [
+      el('p', { text: 'Lost a phone, or changed the PIN? Sign out every door phone. Staff type the PIN again to get back in.' }),
+      el('button', { type: 'button', class: 'danger', text: 'Sign out all door phones', onclick: async function () {
+        if (!(await ask('Sign out all door phones?', 'Every phone scanning ' + ev.name + ' goes back to the PIN screen. Check-ins already made stay.', 'Sign out phones', true))) return;
+        var r = await api('POST', '/api/admin/events/' + ev.id + '/signout-devices', {});
+        toast(r.signedOut ? plural(r.signedOut, 'phone', 'phones') + ' signed out' : 'No phones were signed in');
+      } }),
+    ]));
     return el('form', { onsubmit: async function (e) {
       e.preventDefault();
       err.textContent = '';
@@ -309,7 +353,7 @@
       el('span', { class: 'tag ' + st[0], text: st[1] }),
       el('span', { text: [ev.venue, ev.startsAt ? fmtDate(ev.startsAt) : 'No date set', fmtDoors(ev.startsAt)].filter(Boolean).join(' · ') }),
     ]);
-    main.appendChild(pageHead([{ text: 'Events', href: '#/' }], ev.name + (ev.archived ? ' (archived)' : ''), [
+    main.appendChild(pageHead([{ text: 'Events', href: '#/' }], ev.name, [
       el('div', { class: 'pin-chip', title: 'Door PIN: door staff type this to sign in' }, [el('span', { class: 'label xs', text: 'PIN' }), el('b', { text: ev.doorPin || '••••' })]),
       el('a', { class: 'btn', href: '/', target: '_blank', rel: 'noopener', text: 'Open door app' }),
       el('button', { type: 'button', text: 'Edit', onclick: function () { var close = modal('Edit event', eventForm(ev, function () { close(); route(); })); } }),
@@ -351,7 +395,10 @@
       if (s.kind === 'api' && s.lastSyncOk === false) {
         out.push({ s: s, text: splitMsg(s.lastSyncMessage)[0] || 'The last sync failed.', action: ['Open settings', function () { editApiSource(ev, s); }] });
       } else if (s.lastSyncMessage && /safety check/.test(s.lastSyncMessage)) {
-        out.push({ s: s, text: 'Some tickets disappeared from ' + s.platformName + '. Voiding them is on hold until you confirm.', action: ['Apply voids', function (e) { if (confirm('Void every ticket that is no longer on ' + s.platformName + '?')) runSync(s, { force: true }, e.target); }] });
+        out.push({ s: s, text: 'Some tickets disappeared from ' + s.platformName + '. Voiding them is on hold until you confirm.', action: ['Apply voids', async function (e) {
+          var btn = e.currentTarget;
+          if (await ask('Void the missing tickets?', 'Every ticket that is no longer on ' + s.platformName + ' gets voided. Door phones show NOT VALID if someone scans one.', 'Void them', true)) runSync(s, { force: true }, btn);
+        }] });
       } else if (s.kind === 'file' && !over) {
         if (!s.lastSyncAt) out.push({ s: s, text: 'No file uploaded yet.', action: ['Upload file', upload] });
         else if (isStale(s)) out.push({ s: s, text: 'List uploaded ' + ago(s.lastSyncAt) + '. Upload a fresh export before doors so refunds and resales get caught.', action: ['Upload file', upload] });
@@ -368,7 +415,10 @@
     if (tab && !tab.classList.contains('active')) tab.click();
     setTimeout(function () {
       var seg = Array.prototype.find.call(document.querySelectorAll('.seg button'), function (b) { return /^Flagged/.test(b.textContent); });
-      if (seg) { seg.click(); seg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+      if (!seg) return;
+      seg.click(); // redraws the filter buttons, so scroll to the tabs, not the old button
+      var tabs = document.querySelector('.tabs');
+      if (tabs) tabs.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 50);
   }
 
@@ -380,7 +430,8 @@
     var pct = st.valid ? Math.round(100 * st.scanned / st.valid) : 0;
     var phones = (data.devices || []).filter(function (d) { return !d.revoked && d.lastSeenAt && Date.now() - new Date(d.lastSeenAt).getTime() < 15 * 60e3; }).length;
     function fact(num, text) { return el('span', null, [el('b', { text: num }), text]); }
-    box.appendChild(el('section', { class: 'tally', 'aria-label': 'Check-in' }, [
+    // Nothing sold or scanned yet: a wall of zeros says nothing, so the page opens on "Where tickets were sold".
+    if (st.valid || st.scanned || rows.all || st.lastScanAt) box.appendChild(el('section', { class: 'tally', 'aria-label': 'Check-in' }, [
       el('div', { class: 'tally-top' }, [
         el('div', { class: 'tally-count' }, [el('b', { text: n(st.scanned) }), el('span', { class: 'in', text: ' in' }), el('span', { class: 'of', text: ' / ' + n(st.valid) })]),
         el('div', { class: 'tally-pct' }, [el('b', { text: pct + '%' }), ' checked in']),
@@ -390,7 +441,7 @@
         fact(n(Math.max(0, st.valid - st.scanned)), ' not here yet'),
         fact(n(rows.void), ' void'),
         st.lastScanAt ? el('span', null, ['Last scan ', el('b', { text: fmtClock(st.lastScanAt) })]) : el('span', { text: 'No scans yet' }),
-        fact(n(phones), phones === 1 ? ' door phone active' : ' door phones active'),
+        phones ? fact(n(phones), phones === 1 ? ' door phone active' : ' door phones active') : el('span', { text: 'No door phones active' }),
       ]),
     ]));
 
@@ -406,10 +457,11 @@
       ]));
     }
 
-    box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/add', text: 'Add source' })]));
+    var none = !data.sources.length;
+    box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), none ? null : el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/add', text: 'Add source' })]));
     var byId = {};
     (st.bySource || []).forEach(function (s) { byId[s.source_id] = s; });
-    if (!data.sources.length) {
+    if (none) {
       box.appendChild(el('div', { class: 'empty-card gap-bottom' }, [
         el('p', { text: 'Add every platform this event sold on: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV export. Door phones scan all of them.' }),
         el('a', { class: 'btn primary', href: '#/event/' + ev.id + '/add', text: 'Add source' }),
@@ -461,8 +513,10 @@
       actions.appendChild(el('a', { class: 'btn sm' + (due ? ' primary' : ''), href: '#/event/' + ev.id + '/upload/' + s.id, text: s.lastSyncAt ? 'Upload new file' : 'Upload file' }));
     }
     actions.appendChild(el('button', { type: 'button', class: 'text-btn', text: 'Remove', 'aria-label': 'Remove ' + s.platformName + (label ? ' ' + label : ''), onclick: async function () {
-      if (!confirm('Remove ' + s.platformName + (label ? ' (' + label + ')' : '') + '? Its ' + counts.valid + ' tickets will stop scanning.')) return;
+      var what = counts.valid ? 'Its ' + plural(counts.valid, 'ticket gets', 'tickets get') + ' voided: door phones show NOT VALID if one is scanned. ' : '';
+      if (!(await ask('Remove ' + s.platformName + (label ? ' · ' + label : '') + '?', what + 'The scan log keeps every check-in.', 'Remove', true))) return;
       await api('DELETE', '/api/admin/sources/' + s.id);
+      toast(s.platformName + ' removed');
       route();
     } }));
     var msg = failed ? splitMsg(s.lastSyncMessage) : null;
@@ -545,7 +599,9 @@
     data.sources.forEach(function (s) { added[s.platform] = true; });
     var state = { platform: null, kind: null };
     var main = shell();
-    main.appendChild(pageHead([{ text: 'Events', href: '#/' }, { text: ev.name, href: '#/event/' + ev.id }, { text: 'Sources' }], 'Add a ticket source', [el('a', { class: 'btn', href: '#/event/' + ev.id, text: 'Cancel' })]));
+    var head = pageHead([{ text: 'Events', href: '#/' }, { text: ev.name, href: '#/event/' + ev.id }, { text: 'Sources' }], 'Add a ticket source', [el('a', { class: 'btn', href: '#/event/' + ev.id, text: 'Cancel' })]);
+    head.querySelector('.head-actions').classList.add('back-only'); // phones use the back link above the title
+    main.appendChild(head);
     var left = el('div');
     var right = el('div', { class: 'side-card' });
     main.appendChild(el('div', { class: 'split' }, [left, right]));
@@ -558,8 +614,8 @@
       left.textContent = '';
       left.appendChild(step(1, 'Pick the platform', el('div', { class: 'pick-grid' }, Object.keys(PLATFORMS).map(function (p) {
         var on = state.platform === p;
-        return el('button', { type: 'button', class: 'pick' + (on ? ' on' : ''), onclick: function () { state.platform = p; state.kind = PLATFORMS[p].kinds[0]; draw(); } }, [
-          el('span', { text: PLATFORMS[p].name }),
+        return el('button', { type: 'button', class: 'pick' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', onclick: function () { state.platform = p; state.kind = PLATFORMS[p].kinds[0]; draw(); } }, [
+          el('span', { class: 'pn', text: PLATFORMS[p].name }),
           on ? el('span', { class: 'label', text: 'Selected' }) : added[p] ? el('span', { class: 'label done', text: '✓ Added' }) : null,
         ]);
       }))));
@@ -673,7 +729,11 @@
     var body = el('div');
     var close = modal(s.platformName + ' settings', body);
     var help = (HELP[s.platform] || {}).api || [];
-    if (help.length) body.appendChild(el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); })));
+    // The fields come first. The steps fold away; they open by themselves when the last sync failed.
+    if (help.length) body.appendChild(el('details', { class: 'howto-fold', open: s.lastSyncOk === false }, [
+      el('summary', { text: 'Where to find these' }),
+      el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); })),
+    ]));
     body.appendChild(sourceForm(ev, s.platform, 'api', s, close));
   }
 
@@ -686,7 +746,7 @@
     var s = data.sources.filter(function (x) { return x.id === sourceId; })[0];
     if (!s) { location.hash = '#/event/' + eventId; return; }
     var main = shell();
-    var headActions = el('div', { class: 'head-actions' }, [el('a', { class: 'btn', href: '#/event/' + ev.id, text: 'Back to event' })]);
+    var headActions = el('div', { class: 'head-actions back-only' }, [el('a', { class: 'btn', href: '#/event/' + ev.id, text: 'Back to event' })]);
     var head = pageHead([{ text: 'Events', href: '#/' }, { text: ev.name, href: '#/event/' + ev.id }, { text: 'Sources' }], 'Upload file — ' + s.platformName, []);
     head.appendChild(headActions);
     main.appendChild(head);
@@ -712,7 +772,7 @@
       var zone = el('label', { class: 'dropzone' }, [
         input,
         el('div', { class: 'label sm', text: 'CSV export' }),
-        el('div', { text: 'Drop the file here, or' }),
+        el('div', { class: 'drop-text', text: 'Drop the file here, or' }),
         el('span', { class: 'btn primary', text: 'Choose a CSV file' }),
         el('small', { class: 'muted', text: 'Excel file? Open it and save it as CSV first.' }),
       ]);
@@ -727,6 +787,7 @@
     function renderMapping(fileName, prev, text) {
       body.textContent = '';
       headActions.textContent = '';
+      headActions.classList.remove('back-only');
       headActions.appendChild(el('div', { class: 'file-chip' }, [
         el('span', { class: 'f', text: fileName }),
         el('span', { class: 'label xs', text: n(prev.rowCount) + ' rows' }),
@@ -735,7 +796,7 @@
       var mapping = Object.assign({}, prev.mapping);
       var FIELDS = [['code', 'QR code'], ['name', 'Name'], ['firstName', 'First name'], ['lastName', 'Last name'], ['email', 'Email'], ['ticketType', 'Ticket type'], ['quantity', 'Quantity'], ['status', 'Status'], ['extId', 'Ticket / order ID']];
       var banner = el('div', { class: 'alert' }, [el('span', { class: 'tag warn', text: 'No QR column' }), el('div', null, ['This file has no QR code column. Guests from it can only be checked in with ', el('strong', { text: 'Search' }), ' at the door. Scanning their tickets will show NOT FOUND. If ' + (s.platform === 'other' ? 'the platform' : s.platformName) + ' can export ticket codes, upload that file instead.'])]);
-      var previewTable = el('table', { class: 'data' });
+      var previewTable = el('table', { class: 'data preview' });
       var summaryLine = el('span', { class: 'muted' });
       var full = el('input', { type: 'radio', name: 'mode', value: 'replace', checked: true });
       var add = el('input', { type: 'radio', name: 'mode', value: 'merge' });
@@ -755,14 +816,15 @@
       var mapRows = FIELDS.map(function (f) {
         var sel = el('select', null, [el('option', { value: '-1', text: f[0] === 'code' ? 'None in this file' : 'Not in this file' })].concat(prev.headers.map(function (h, i) { return el('option', { value: String(i), text: h }); })));
         sel.value = String(mapping[f[0]] === undefined ? -1 : mapping[f[0]]);
+        sel.setAttribute('aria-label', f[1] + ' column');
         sampleCells[f[0]] = el('td', { class: 'sample' });
         function upd() {
           sel.className = f[0] === 'code' && !(mapping.code >= 0) ? 'none' : '';
-          sampleCells[f[0]].textContent = mapping[f[0]] >= 0 ? sampleValues(mapping[f[0]]) : '—';
+          sampleCells[f[0]].textContent = mapping[f[0]] >= 0 ? sampleValues(mapping[f[0]]) : '';
         }
         sel.addEventListener('change', function () { mapping[f[0]] = Number(sel.value); upd(); refresh(); });
         upd();
-        return el('tr', null, [el('td', null, [el('strong', { text: f[1] })]), el('td', null, [sel]), sampleCells[f[0]]]);
+        return el('tr', null, [el('td', { class: 'fld' }, [el('strong', { text: f[1] })]), el('td', { class: 'col' }, [sel]), sampleCells[f[0]]]);
       });
 
       function cell(row, k) { return mapping[k] >= 0 ? String(row[mapping[k]] || '').trim() : ''; }
@@ -773,10 +835,11 @@
         previewTable.appendChild(el('thead', null, [el('tr', null, cols.map(function (c) { return el('th', { text: c[1] }); }))]));
         previewTable.appendChild(el('tbody', null, prev.sample.slice(0, 6).map(function (r) {
           return el('tr', null, cols.map(function (c) {
-            if (c[0] === 'name') return el('td', null, [el('strong', { text: cell(r, 'name') || [cell(r, 'firstName'), cell(r, 'lastName')].filter(Boolean).join(' ') || cell(r, 'email') || '—' })]);
-            if (c[0] === 'status') { var st = cell(r, 'status'); return el('td', null, [st && VOID_STATUS.test(st) ? el('span', { class: 'tag void', text: 'Void' }) : st || 'Valid']); }
-            if (c[0] === 'code') return el('td', { class: 'email', text: cell(r, 'code') || '(no code: skipped)' });
-            return el('td', { text: cell(r, c[0]) || '—' });
+            if (c[0] === 'name') return el('td', { class: 'pv-name' }, [el('strong', { text: cell(r, 'name') || [cell(r, 'firstName'), cell(r, 'lastName')].filter(Boolean).join(' ') || cell(r, 'email') || '—' })]);
+            if (c[0] === 'status') { var st = cell(r, 'status'); return el('td', { class: 'pv-status' }, [st && VOID_STATUS.test(st) ? el('span', { class: 'tag void', text: 'Void' }) : st || 'Valid']); }
+            if (c[0] === 'code') return el('td', { class: 'email pv-code', text: cell(r, 'code') || '(no code: skipped)' });
+            var v = cell(r, c[0]);
+            return el('td', { class: 'pv-' + c[0] + (v ? '' : ' blank'), text: v || '—' });
           }));
         })));
       }
@@ -792,7 +855,7 @@
             var sm = res.summary || { tickets: 0, valid: 0, void: 0 };
             go.textContent = 'Import ' + n(sm.tickets) + ' ticket' + (sm.tickets === 1 ? '' : 's');
             go.disabled = !sm.tickets;
-            summaryLine.textContent = n(sm.valid) + ' valid · ' + n(sm.void) + ' void' + (sm.nameOnly ? ' · name-only' : '');
+            summaryLine.textContent = n(sm.valid) + ' valid' + (sm.void ? ' · ' + n(sm.void) + ' void' : '') + (sm.nameOnly ? ' · no QR codes' : '');
           } catch (ex) { summaryLine.textContent = ''; }
         }, 200);
       }
@@ -845,8 +908,11 @@
       if (help.length) body.appendChild(el('ol', { class: 'howto' }, help.map(function (h) { return el('li', { text: h }); })));
       var data;
       try { data = await api('GET', '/api/admin/sources/' + s.id + '/webhooks'); } catch (e) { body.appendChild(el('p', { class: 'error', text: e.message })); return; }
-      body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: data.total + ' webhook(s) received' }), el('button', { type: 'button', class: 'sm', text: 'Refresh', onclick: render })]));
-      if (!data.items.length) { body.appendChild(el('p', { class: 'muted', text: 'Nothing yet. Buy a test ticket, then refresh.' })); return; }
+      body.appendChild(el('div', { class: 'section-head' }, [
+        el('h2', { text: data.total ? plural(data.total, 'sale', 'sales') + ' received' : 'No sales received yet' }),
+        el('button', { type: 'button', class: 'sm', text: 'Refresh', onclick: render }),
+      ]));
+      if (!data.items.length) { body.appendChild(el('p', { class: 'muted', text: 'Buy one test ticket on ' + (s.platform === 'other' ? 'the platform' : s.platformName) + ', then tap Refresh.' })); return; }
       var m = Object.assign({ items: '', code: '', name: '', firstName: '', lastName: '', email: '', ticketType: '', status: '', extId: '' }, data.mapping || data.guess || {});
       var inputs = {};
       var labels = { items: 'List of tickets (if one webhook has several)', code: 'QR / barcode value', name: 'Full name', firstName: 'First name', lastName: 'Last name', email: 'Email', ticketType: 'Ticket type', status: 'Status', extId: 'Ticket ID' };
@@ -916,21 +982,38 @@
 
   function ticketsTab(box, ev, data) {
     var rows = data.stats.rows || {};
-    var q = el('input', { class: 'search', type: 'search', placeholder: 'Search name, email or ticket code' });
+    if (!rows.all) {
+      box.appendChild(el('p', { class: 'muted', text: data.sources.length ? 'No tickets yet. They show up here as soon as a source brings some in.' : 'No tickets yet. Add where this event sold tickets and they show up here.' }));
+      return;
+    }
+    var q = el('input', { class: 'search', type: 'search', placeholder: 'Search name, email or ticket code', 'aria-label': 'Search tickets' });
     var status = '';
     var segs = [['', 'All', rows.all], ['scanned', 'In', rows.scanned], ['unscanned', 'Not here', rows.unscanned], ['void', 'Void', rows.void]];
     if (rows.flagged) segs.push(['flagged', 'Flagged', rows.flagged]);
     var seg = el('div', { class: 'seg' });
     function drawSeg() {
       seg.textContent = '';
-      segs.forEach(function (sg) { seg.appendChild(el('button', { type: 'button', class: status === sg[0] ? 'on' : '', text: sg[1] + ' ' + n(sg[2]), onclick: function () { status = sg[0]; drawSeg(); load(); } })); });
+      segs.forEach(function (sg) { seg.appendChild(el('button', { type: 'button', class: status === sg[0] ? 'on' : '', 'aria-pressed': status === sg[0] ? 'true' : 'false', text: sg[1] + ' ' + n(sg[2]), onclick: function () { status = sg[0]; drawSeg(); load(); } })); });
+      // On a phone the chips scroll sideways: keep the chosen one in view.
+      var on = seg.querySelector('button.on');
+      if (on && seg.scrollWidth > seg.clientWidth) {
+        var a = seg.getBoundingClientRect();
+        var b = on.getBoundingClientRect();
+        if (b.right > a.right - 8) seg.scrollLeft += b.right - a.right + 24;
+        else if (b.left < a.left + 8) seg.scrollLeft -= a.left - b.left + 24;
+      }
     }
     var list = el('div', { class: 'table-wrap' });
     var timer;
     async function load() {
       var res = await api('GET', '/api/admin/events/' + ev.id + '/tickets?limit=200&q=' + encodeURIComponent(q.value) + '&status=' + status);
       list.textContent = '';
-      if (!res.tickets.length) { list.appendChild(el('p', { class: 'muted', text: 'No tickets match.' })); return; }
+      if (!res.tickets.length) {
+        var none = { scanned: 'Nobody is in yet.', unscanned: 'Everyone is in.', void: 'No void tickets.', flagged: 'Nothing flagged.' }[status];
+        var qv = q.value.trim();
+        list.appendChild(el('p', { class: 'muted empty-line', text: qv ? (status ? 'Nothing in this filter matches “' + qv + '”.' : 'No tickets match “' + qv + '”. Check the spelling, or try their email or ticket code.') : none || 'No tickets.' }));
+        return;
+      }
       list.appendChild(el('table', { class: 'data tickets' }, [
         el('thead', null, [el('tr', null, [['Guest'], ['Ticket type', 'hide-sm'], ['Platform', 'hide-sm'], ['Email', 'hide-sm'], ['Status'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
         el('tbody', null, res.tickets.map(function (t) {
@@ -948,15 +1031,19 @@
               load();
             } });
           } else if (t.scannedAt) {
-            action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', onclick: async function () { await api('POST', '/api/admin/tickets/' + t.id + '/undo', {}); load(); } });
+            action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', 'aria-label': 'Undo check-in for ' + (t.holderName || 'guest'), onclick: async function () {
+              await api('POST', '/api/admin/tickets/' + t.id + '/undo', {});
+              toast((t.holderName || 'Guest') + ' is no longer checked in');
+              load();
+            } });
           }
           return el('tr', null, [
             el('td', { class: 'guest' }, [el('strong', { text: t.holderName || '(no name)' }), isMadeUp(t.code) ? el('span', { class: 'tag noqr', title: 'This list had no QR codes: check this guest in by name', text: 'no QR' }) : null, el('span', { class: 'sub show-sm', text: [t.ticketType, platformName(t.platform)].filter(Boolean).join(' · ') })]),
             el('td', { class: 'hide-sm', text: t.ticketType || '' }),
             el('td', { class: 'hide-sm' }, [el('span', { class: 'badge sm', text: platformName(t.platform) })]),
             el('td', { class: 'email hide-sm', text: t.holderEmail || '' }),
-            el('td', null, [statusCell, t.flag ? el('span', { class: 'tag flag', text: t.flag.replace(/_/g, ' ') }) : null]),
-            el('td', { class: 'r' }, [action]),
+            el('td', { class: 'st' }, [statusCell, t.flag ? el('span', { class: 'tag flag', text: t.flag.replace(/_/g, ' ') }) : null]),
+            el('td', { class: 'r act' }, [action]),
           ]);
         })),
       ]));
@@ -978,10 +1065,10 @@
       el('tbody', null, res.scans.map(function (s) {
         var l = labels[s.result] || ['muted', s.result];
         return el('tr', null, [
-          el('td', { class: 'num', text: fmtClock(s.scanned_at) }),
-          el('td', null, [el('span', { class: 'tag ' + l[0], text: l[1] }), s.note ? el('span', { class: 'sub', text: s.note.replace(/_/g, ' ') }) : null]),
-          el('td', null, [s.holder_name ? el('strong', { text: s.holder_name }) : (s.code_raw ? el('span', { class: 'mono', text: String(s.code_raw).slice(0, 40) }) : ''), el('span', { class: 'sub', text: [s.ticket_type, s.platform ? platformName(s.platform) : ''].filter(Boolean).join(' · ') })]),
-          el('td', { text: s.device_name || '' }),
+          el('td', { class: 'num t' }, [fmtClock(s.scanned_at)]),
+          el('td', { class: 'res' }, [el('span', { class: 'tag ' + l[0], text: l[1] }), s.note ? el('span', { class: 'sub', text: s.note.replace(/_/g, ' ') }) : null]),
+          el('td', { class: 'who' }, [s.holder_name ? el('strong', { text: s.holder_name }) : (s.code_raw ? el('span', { class: 'mono', text: String(s.code_raw).slice(0, 40) }) : ''), el('span', { class: 'sub', text: [s.ticket_type, s.platform ? platformName(s.platform) : ''].filter(Boolean).join(' · ') })]),
+          el('td', { class: 'door', text: s.device_name || '' }),
           el('td', { class: 'muted hide-sm', text: ({ camera: 'Camera', manual: 'Typed', search: 'Search', scanner: 'Handheld scanner' }[s.method] || s.method) + (s.offline ? ' · offline' : '') }),
         ]);
       })),
@@ -1000,11 +1087,11 @@
     box.appendChild(el('p', { class: 'muted tab-intro', text: 'Check a code without admitting anyone. Scan the ticket with any QR reader app and paste the text here, or type the number printed under the QR.' }));
     box.appendChild(el('form', { class: 'toolbar-row', onsubmit: async function (e) {
       e.preventDefault();
+      if (!input.value.trim()) { input.focus(); return; }
       var res = await api('POST', '/api/admin/events/' + ev.id + '/lookup', { code: input.value });
       out.textContent = '';
       if (!res.tickets.length) {
         out.appendChild(verdictCard('not_found', 'Not found', 'No ticket for this event has this code', 'If it came from a link or has extra characters, check that the platform export uses the same value. Tried: ' + (res.keys.join(', ') || '(empty)')));
-        return;
       }
       res.tickets.forEach(function (t) {
         var kind = t.status === 'void' ? 'void' : t.scannedAt ? 'duplicate' : 'admitted';
@@ -1012,21 +1099,36 @@
         var detail = t.status === 'void' ? (t.voidReason || 'Void') : t.scannedAt ? 'Scanned ' + fmtClock(t.scannedAt) + (t.scannedBy ? ' at ' + t.scannedBy : '') : 'Valid, not scanned yet';
         out.appendChild(verdictCard(kind, word, t.holderName || '(no name)', [t.ticketType, platformName(t.platform), detail].filter(Boolean).join(' · ')));
       });
+      // On a phone the keyboard hides the answer: put the keyboard away and bring the answer into view.
+      if (matchMedia('(pointer: coarse)').matches) input.blur();
+      out.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } }, [input, el('button', { class: 'primary', type: 'submit', text: 'Check' })]));
     box.appendChild(out);
   }
 
   function devicesTab(box, ev, data) {
+    if (!data.devices.length) { box.appendChild(el('p', { class: 'muted', text: 'No phones yet. Open the door app on a phone and type the PIN. It shows up here.' })); return; }
     box.appendChild(el('p', { class: 'muted', text: 'Phones signed in to the door app for this event.' }));
-    if (!data.devices.length) { box.appendChild(el('p', { class: 'muted', text: 'None yet.' })); return; }
-    box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data' }, [
-      el('thead', null, [el('tr', null, ['Device', 'Signed in', 'Last seen', ''].map(function (h) { return el('th', { text: h }); }))]),
+    function seen(d) { return d.lastSeenAt ? ago(d.lastSeenAt) : 'not yet'; }
+    box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data devices' }, [
+      el('thead', null, [el('tr', null, [['Device'], ['Signed in', 'hide-sm'], ['Last seen', 'hide-sm'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
       el('tbody', null, data.devices.map(function (d) {
-        return el('tr', null, [
-          el('td', null, [el('strong', { text: d.name }), d.revoked ? el('span', { class: 'sub', text: 'Signed out' }) : null]),
-          el('td', { text: fmtDate(d.createdAt) + ' ' + fmtClock(d.createdAt) }),
-          el('td', { text: ago(d.lastSeenAt) }),
-          el('td', { class: 'r' }, [d.revoked ? null : el('button', { type: 'button', class: 'xs danger', text: 'Sign out', onclick: async function () { await api('POST', '/api/admin/devices/' + d.id + '/revoke', {}); route(); } })]),
+        return el('tr', { class: d.revoked ? 'off' : '' }, [
+          el('td', { class: 'dev' }, [
+            el('strong', { text: d.name }),
+            d.revoked ? el('span', { class: 'sub', text: 'Signed out' }) : null,
+            el('span', { class: 'sub show-sm', text: 'Signed in ' + fmtStamp(d.createdAt).replace(/^Today /, '') + ' · seen ' + seen(d) }),
+          ]),
+          el('td', { class: 'hide-sm', text: fmtStamp(d.createdAt) }),
+          el('td', { class: 'hide-sm', text: seen(d) }),
+          el('td', { class: 'r' }, [d.revoked ? null : el('button', { type: 'button', class: 'xs danger', text: 'Sign out', 'aria-label': 'Sign out ' + d.name, onclick: async function () {
+            if (!(await ask('Sign out ' + d.name + '?', 'That phone goes back to the PIN screen. Staff type the PIN to get back in, and scans saved on it upload then.', 'Sign out', true))) return;
+            await api('POST', '/api/admin/devices/' + d.id + '/revoke', {});
+            toast(d.name + ' signed out');
+            try { data.devices = (await api('GET', '/api/admin/events/' + ev.id)).devices; } catch (e) { return route(); }
+            box.textContent = '';
+            devicesTab(box, ev, data); // stay on this tab
+          } })]),
         ]);
       })),
     ])]));
@@ -1041,6 +1143,8 @@
   }
 
   // ------------------------------------------------------------------ start
+
+  document.addEventListener('touchstart', function () {}, { passive: true }); // lets iPhone Safari show :active pressed states
 
   (async function start() {
     try { await api('GET', '/api/admin/me', null, { allow401: true }); route(); } catch (e) { renderLogin(); }

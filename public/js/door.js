@@ -80,7 +80,12 @@
     (children || []).forEach(function (c) { if (c) n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
     return n;
   }
-  function show(id) { $(id).hidden = false; }
+  // Screens slide in; re-adding the class restarts the animation.
+  function animateIn(node) { node.classList.remove('enter'); void node.offsetWidth; node.classList.add('enter'); }
+  function show(id) { var n = $(id); var was = n.hidden; n.hidden = false; if (was) animateIn(n); }
+  // The phone's status bar takes the result's color, like the rest of the screen.
+  var THEME = { admitted: '#2BD46A', duplicate: '#D42A24', void: '#6B1014', not_found: '#FF8A1F' };
+  function setTheme(color) { var m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute('content', color || '#0d0b0c'); }
   function hide(id) { $(id).hidden = true; }
   function isMadeUp(t) { return !!(t && t.k && t.k.indexOf('NOQR-') === 0); }
   function eventLine(ev) { return [ev.name, ev.venue].filter(Boolean).join(' · '); }
@@ -213,8 +218,15 @@
       : state === 'loading' ? 'Loading list'
       : queued ? 'Online · ' + queued + ' to sync'
       : 'Online';
-    $('sync-title').textContent = lastSyncAt ? 'Synced ' + fmtTime(new Date(lastSyncAt).toISOString()) : 'Not synced yet';
-    $('data-status').textContent = tickets.size.toLocaleString() + ' tickets · ' + queued + ' waiting' + (syncError ? ' · ' + syncError : '') + (!online ? ' · offline' : '');
+    var last = lastSyncAt ? fmtTime(new Date(lastSyncAt).toISOString()) : '';
+    var stuck = state === 'offline' || state === 'error';
+    // The title says what's true now; the last good sync moves to the line under it.
+    $('sync-title').textContent = state === 'offline' ? 'Offline' : state === 'error' ? 'Sync isn’t working' : last ? 'Synced ' + last : 'Not synced yet';
+    $('data-status').textContent = [
+      tickets.size.toLocaleString() + ' tickets on this phone',
+      queued ? queued + (queued === 1 ? ' scan' : ' scans') + ' not sent yet' : 'all scans sent',
+      stuck ? (last ? 'last synced ' + last : 'scans still work') : '',
+    ].filter(Boolean).join(' · ');
   }
 
   async function flushOutbox() {
@@ -349,8 +361,10 @@
     } else if (res === 'void') {
       name = r ? (r.n || 'Ticket holder') : '';
       line1 = voidReason(r && r.v);
-      var why = r && r.v ? String(r.v).trim() : '';
-      line2 = (why && why.toLowerCase() !== line1.toLowerCase() ? why.replace(/\.?$/, '. ') : '') + 'Do not admit.';
+      var why = r && r.v ? String(r.v).trim().replace(/\.$/, '') : '';
+      // "Canceled" over "Canceled (or transferred…)" says it twice: show the platform's wording once.
+      if (why && why.toLowerCase().indexOf(line1.toLowerCase()) === 0) { line1 = why; why = ''; }
+      line2 = (why && why.toLowerCase() !== line1.toLowerCase() ? why + '. ' : '') + 'Do not admit.';
     } else if (res === 'not_found') {
       line1 = out.rechecking ? 'Checking the ticket platforms.' : 'Not on any list.';
       line2 = out.rechecking ? 'Scan again in 10 seconds.' : 'Ask for their name or email.';
@@ -367,6 +381,8 @@
     $('r-search').hidden = !(res === 'not_found' && !out.rechecking);
 
     box.hidden = false;
+    animateIn(box);
+    setTheme(THEME[res]);
     feedback(res);
     var dur = res === 'admitted' ? 1500 : 4000;
     var fill = $('r-fill');
@@ -391,6 +407,7 @@
   function dismissResult() {
     clearTimeout(resultTimer);
     $('result').hidden = true;
+    setTheme();
     if (scanner && pagesClosed()) scanner.resume();
   }
 
@@ -574,6 +591,15 @@
 
   // ------------------------------------------------------------------ camera
 
+  // What a door person can do about it, not the browser's wording.
+  function cameraProblem(e) {
+    var name = e && e.name;
+    if (name === 'NotAllowedError' || name === 'SecurityError') return 'Camera access is blocked. Allow the camera for this site in your browser settings, then tap Try again.';
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No camera found on this device. Use Find guest, or turn on Handheld scanner in More.';
+    if (name === 'NotReadableError' || name === 'AbortError' || name === 'TrackStartError') return 'Another app is using the camera. Close it, then tap Try again.';
+    return (e && (!name || name === 'Error') && e.message) || 'The camera didn’t start. Tap Try again, or use Find guest.';
+  }
+
   async function startCamera() {
     var msg = $('camera-msg');
     msg.hidden = true;
@@ -588,10 +614,11 @@
       var info = await scanner.start();
       $('btn-torch').hidden = !info.torch;
     } catch (e) {
-      msg.textContent = e && e.name === 'NotAllowedError'
-        ? 'Camera access is blocked. Allow the camera for this site in your browser settings, then reload.'
-        : (e && e.message) || 'Could not start the camera.';
+      msg.textContent = '';
+      msg.appendChild(el('p', { text: cameraProblem(e) }));
+      msg.appendChild(el('button', { type: 'button', class: 'primary', text: 'Try again', onclick: startCamera }));
       msg.hidden = false;
+      $('frame').hidden = true; // no camera picture: an empty frame would only suggest pointing at it
       $('scan-hint').hidden = true;
     }
   }
@@ -644,6 +671,7 @@
     if (k === 'back') pinValue = pinValue.slice(0, -1);
     else if (/^\d$/.test(k) && pinValue.length < 12) pinValue += k;
     else return;
+    if (navigator.vibrate) navigator.vibrate(8);
     $('pin-error').textContent = '';
     renderPinBoxes();
     if (k !== 'back' && pinLengths.indexOf(pinValue.length) !== -1) tryUnlock();
@@ -799,8 +827,28 @@
     hide('result');
   }
 
+  // In-app confirm sheet. Resolves true only on the action button.
+  function ask(title, text, yes) {
+    return new Promise(function (resolve) {
+      var box = $('ask');
+      $('ask-title').textContent = title;
+      $('ask-text').textContent = text;
+      $('ask-yes').textContent = yes;
+      function answer(v) { box.hidden = true; $('ask-yes').onclick = $('ask-no').onclick = box.onclick = null; resolve(v); }
+      $('ask-yes').onclick = function (e) { e.stopPropagation(); answer(true); };
+      $('ask-no').onclick = function (e) { e.stopPropagation(); answer(false); };
+      box.onclick = function (e) { if (e.target === box) answer(false); };
+      box.hidden = false;
+      $('ask-no').focus();
+    });
+  }
+
   async function logout() {
-    if (outbox.size && !confirm(outbox.size + ' scans have not uploaded yet. Sign out anyway? They will be lost.')) return;
+    if (outbox.size && online) await syncNow(); // try to send saved scans first
+    var one = outbox.size === 1;
+    if (outbox.size && !(await ask('Sign out with ' + (one ? '1 scan' : outbox.size + ' scans') + ' not sent?',
+      'This phone hasn’t sent ' + (one ? 'that check-in' : 'those check-ins') + ' to the server yet. Signing out deletes ' + (one ? 'it, and other doors won’t know that guest is in.' : 'them, and other doors won’t know those guests are in.'),
+      'Sign out anyway'))) return;
     var name = session && session.event ? 'door-' + session.event.id : null;
     stopEverything();
     if (db) { db.close(); db = null; }
@@ -870,6 +918,7 @@
   }
 
   bind();
+  document.addEventListener('touchstart', function () {}, { passive: true }); // lets iPhone Safari show :active pressed states
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     navigator.serviceWorker.register('/sw.js').catch(function () { /* offline cache unavailable */ });
   }
