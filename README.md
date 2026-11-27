@@ -50,8 +50,15 @@ Any host that runs Docker and keeps a disk works the same way (Render with a dis
 1. **Day before:** create the event and door PIN, then add every source. The event page's *Ready for doors* list shows what's left: lists to upload or fix, then the door staff. Check each source's count matches that platform's dashboard.
 2. **Test:** buy one ticket per platform (activate the DICE one in the app). On the event's Door tab, *Test a code* (or in the door app, More → Test mode) shows what the QR contains and whether it matches.
 3. **An hour before doors:** re-upload RA and Bucket Listers exports as "full list", and the Posh CSV. The event page flags any list uploaded more than an hour ago. API sources keep syncing on their own.
-4. **Door staff:** *Send to staff* (event page or Door tab) gives you one message to paste or share: the door link, the PIN and what to tap. The link opens the door app on that event, so a phone still set up for another night asks for this event's PIN instead. Staff type the PIN, pick which door the phone is (Door 1, Door 2, VIP, Box office) and tap Start scanning. Open it once with signal so the list downloads. After that it works offline, and it skips straight to scanning next time.
+4. **Door staff:** *Send to staff* (event page or Door tab) gives you one message to paste or share: the door link, the PIN and what to tap. The link opens the door app on that event, so a phone still set up for another night asks for this event's PIN instead. Staff type the PIN, pick which door the phone is and tap Start scanning. The choices are Door 1, Door 2, VIP and Box office unless you set your own on the event's Door tab (Door names → Edit names, up to 8); phones already signed in keep the name they picked. Open it once with signal so the list downloads. After that it works offline, and it skips straight to scanning next time.
 5. **After:** once the night is over, the event page has the guest list and scan log as CSV downloads (platform, ticket type and checked-in time for every ticket).
+
+## Keeping it up on the night
+
+- **Status** (top bar of the admin): the dot is green when everything is fine, amber when something needs a look and red when something needs fixing. The page lists each problem with what to do about it, then tonight's events with each source's last sync and each door phone's last contact. It refreshes on its own.
+- **Uptime checks:** `GET /api/health` answers 200 when the server can serve the door and 503 when it can't (database or background sync broken). It also counts problems (`needsYou`, `toCheck`) without naming any event. Point an uptime monitor at it.
+- **If the server goes down,** phones already signed in keep scanning from their own copy and upload when it's back. A phone that never opened the link can't join until then, so sign every door phone in before doors.
+- **No deploys during doors.** With a volume attached, every deploy restarts the server.
 
 ## What the door sees
 
