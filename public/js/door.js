@@ -826,10 +826,14 @@
     box.textContent = '';
     list.forEach(function (e) { box.appendChild(eventCard(e, e.id === setupEventId, function () { setupEventId = e.id; showSetup(); })); });
     $('pick-another').hidden = !doorEventsList.some(function (e) { return !list.some(function (u) { return u.id === e.id; }); });
-    if (DEVICE_NAMES.indexOf(deviceChoice) === -1) deviceChoice = DEVICE_NAMES[0];
+    // The promoter's door names for the picked event (or the first one listed), else the standard four.
+    var named = list.filter(function (e) { return e.id === setupEventId; })[0] || list[0];
+    var names = named && named.doorNames && named.doorNames.length ? named.doorNames : DEVICE_NAMES;
+    if (names.indexOf(deviceChoice) === -1) deviceChoice = names[0];
     var grid = $('door-grid');
     grid.textContent = '';
-    DEVICE_NAMES.forEach(function (name) {
+    grid.classList.toggle('many', names.length > 4);
+    names.forEach(function (name) {
       var on = name === deviceChoice;
       grid.appendChild(el('button', { type: 'button', class: on ? 'on' : '', role: 'radio', 'aria-checked': on ? 'true' : 'false', text: name, onclick: function () { deviceChoice = name; showSetup(); } }));
     });

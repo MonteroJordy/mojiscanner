@@ -36,7 +36,7 @@
     return n;
   }
 
-  var ICONS = { check: 'M5.5 12.8l4.2 4.2L18.5 7.8', chev: 'M15 5.5 21.5 12 15 18.5', back: 'M19.5 12h-15M10.5 5.5 4 12l6.5 6.5' };
+  var ICONS = { check: 'M5.5 12.8l4.2 4.2L18.5 7.8', chev: 'M15 5.5 21.5 12 15 18.5', back: 'M19.5 12h-15M10.5 5.5 4 12l6.5 6.5', x: 'M7 7l10 10M17 7 7 17' };
   function ico(name) {
     var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('viewBox', '0 0 24 24');
@@ -269,9 +269,10 @@
   // The sidebar layout every signed-in page uses. depth: 0 events, 1 an event, 2 a page inside an event.
   // Going deeper slides the page in from the right, going back from the left.
   var lastDepth = 0;
-  function shell(depth) {
+  function shell(depth, active) {
     clearInterval(refreshTimer);
     depth = depth || 0;
+    active = active || 'events';
     root.textContent = '';
     var main = el('main', { class: 'main' });
     if (pageChange && !reduceMotion) main.classList.add(depth > lastDepth ? 'enter-fwd' : depth < lastDepth ? 'enter-back' : 'enter-fade');
@@ -279,8 +280,9 @@
     root.appendChild(el('div', { class: 'shell' }, [
       el('aside', { class: 'side' }, [
         el('a', { href: '#/', 'aria-label': 'Events' }, [el('img', { class: 'logo', src: '/brand/moji-logo.png', alt: 'Moji' })]),
-        el('a', { class: 'nav active', href: '#/', text: 'Events' }),
-        el('a', { class: 'nav', href: '/', target: '_blank', rel: 'noopener', text: 'Door app' }),
+        el('a', { class: 'nav' + (active === 'events' ? ' active' : ''), href: '#/', text: 'Events' }),
+        el('a', { class: 'nav nav-status' + (active === 'status' ? ' active' : ''), href: '#/status' }, [el('span', { class: 'sdot ' + (lastOverall || ''), 'aria-hidden': 'true' }), 'Status']),
+        el('a', { class: 'nav nav-door', href: '/', target: '_blank', rel: 'noopener', text: 'Door app' }),
         el('div', { class: 'me' }, [
           el('div', { class: 'n', text: 'Moji Sounds' }),
           el('button', { type: 'button', class: 'text-btn', text: 'Sign out', onclick: async function () { await api('POST', '/api/admin/logout', {}); renderLogin(); } }),
@@ -289,6 +291,7 @@
       main,
     ]));
     if (toTop) { window.scrollTo(0, 0); toTop = false; }
+    startStatusPoll();
     freshPage = pageChange;
     pageChange = false;
     return main;
@@ -299,6 +302,7 @@
   // #/event/ID              an event: Overview      (…/guests, …/scans, …/door for the other tabs)
   // #/event/ID/add          add a ticket source
   // #/event/ID/upload/SID   upload a file for a source
+  // #/status                is everything running, and what to do if not
 
   var shownHash = null;
   var toTop = false;
@@ -320,6 +324,7 @@
     if ((m = /^#\/event\/([^/]+)\/add$/.exec(h))) return renderAddSource(m[1]);
     if ((m = /^#\/event\/([^/]+)\/upload\/([^/]+)$/.exec(h))) return renderUpload(m[1], m[2]);
     if ((m = /^#\/event\/([^/]+)/.exec(h))) { location.replace('#/event/' + m[1]); return; }
+    if (h === '#/status') return renderStatus();
     renderEvents();
   }
   window.addEventListener('hashchange', route);
@@ -335,6 +340,159 @@
       if (q) q.focus(); else if (tries < 30) requestAnimationFrame(function () { focusSearch(tries + 1); });
     })(0);
   });
+
+  // ------------------------------------------------------------------ status
+  // One look tells whether tonight is safe: the server, every source, every door phone. Each problem
+  // says what to do. The page checks again every 15 seconds; the dot by "Status" in the menu follows it
+  // from every other page too.
+  var lastOverall = null;
+  function paintDots(level) {
+    lastOverall = level;
+    Array.prototype.forEach.call(document.querySelectorAll('.nav-status .sdot'), function (d) { d.className = 'sdot ' + (level || ''); });
+  }
+  var statusPoll = null;
+  function startStatusPoll() {
+    if (statusPoll) return;
+    var check = function () {
+      if (document.visibilityState !== 'visible' || location.hash === '#/status') return;
+      api('GET', '/api/admin/status', null, { allow401: true, quiet: true }).then(function (st) { paintDots(st.overall); }, function (err) {
+        if (err.status === 401) { clearInterval(statusPoll); statusPoll = null; return; } // signed out
+        paintDots('bad');
+      });
+    };
+    statusPoll = setInterval(check, 30000);
+    check();
+  }
+
+  var LEVEL_WORD = { bad: 'Fix now', warn: 'Check', info: 'Note', ok: 'OK' };
+  function fmtUptime(sec) {
+    var m = Math.floor(sec / 60);
+    if (m < 60) return m + ' min';
+    var h = Math.floor(m / 60);
+    return h < 48 ? h + ' h ' + (m % 60) + ' min' : Math.floor(h / 24) + ' days';
+  }
+  function fmtMB(mb) { return mb >= 1024 ? (Math.round(mb / 102.4) / 10) + ' GB' : mb + ' MB'; }
+
+  async function renderStatus() {
+    var main = shell(0, 'status');
+    var checked = el('span', { class: 'status-checked muted' });
+    main.appendChild(pageHead([], 'Status', [checked], el('p', { class: 'ev-meta', text: 'The server, every ticket source and every door phone for tonight. Checks again every 15 seconds.' })));
+    var body = el('div', { class: 'status-page' });
+    main.appendChild(body);
+    var first = true;
+
+    function hero(level, title, line) {
+      return el('section', { class: 'status-hero ' + level, role: 'status' }, [
+        el('span', { class: 'sd', 'aria-hidden': 'true' }),
+        el('div', null, [el('h2', { text: title }), line ? el('p', { text: line }) : null]),
+      ]);
+    }
+
+    function down(err) {
+      paintDots('bad');
+      body.textContent = '';
+      body.appendChild(hero('bad', 'Can\'t reach the server', err && err.message ? err.message : null));
+      body.appendChild(el('section', { class: 'status-help' }, [
+        el('h2', { text: 'What to do' }),
+        el('ol', { class: 'howto' }, [
+          el('li', { text: 'Door phones keep scanning offline with the list they already have, and send their scans when the server is back. Don\'t sign them out or close the door app.' }),
+          el('li', { text: 'Check your own connection: open any other website.' }),
+          el('li', { text: 'In Railway open mojiscanner → Deployments. If the active deployment crashed, use ⋮ → Restart. If a new deploy failed, ⋮ → Redeploy on the last one that worked.' }),
+          el('li', { text: 'This page keeps trying every 15 seconds and turns green by itself when the server answers.' }),
+        ]),
+      ]));
+      checked.textContent = 'Tried ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    }
+
+    function draw(st) {
+      paintDots(st.overall);
+      var problems = st.checks.filter(function (c) { return c.level === 'bad' || c.level === 'warn'; });
+      var notes = st.checks.filter(function (c) { return c.level === 'info'; });
+      var names = {};
+      st.events.forEach(function (e) { names[e.id] = e.name; });
+      var sv = st.server;
+      var line = ['Server up ' + fmtUptime(sv.uptimeSec), st.checks.some(function (c) { return c.scope === 'server' && /Database/.test(c.title) && c.level === 'bad'; }) ? 'Database error' : 'Database OK',
+        sv.sync === 'ok' ? 'Sync running' : sv.sync === 'off' ? 'Sync off' : sv.sync === 'starting' ? 'Sync starting' : 'Sync stopped',
+        sv.disk ? fmtMB(sv.disk.freeMB) + ' free' : null].filter(Boolean).join(' · ');
+      body.textContent = '';
+      body.appendChild(st.overall === 'ok'
+        ? hero('ok', 'Everything is running', line)
+        : hero(st.overall, problems.length === 1 ? '1 thing needs you' : problems.length + ' things need you', line));
+
+      function checkRow(c) {
+        return el('li', { class: 'chk ' + c.level }, [
+          el('span', { class: 'chk-tag', text: LEVEL_WORD[c.level] }),
+          el('div', { class: 'chk-body' }, [
+            el('span', { class: 'chk-where', text: c.scope === 'server' ? 'Server' : names[c.scope] || '' }),
+            el('strong', { text: c.title }),
+            c.detail ? el('p', { class: 'chk-detail', text: c.detail }) : null,
+            c.fix ? el('p', { class: 'chk-fix' }, [el('span', { class: 'label xs', text: 'What to do' }), c.fix]) : null,
+          ]),
+          c.href ? el('a', { class: 'btn sm', href: c.href, text: 'Open' }) : null,
+        ]);
+      }
+      if (problems.length) {
+        body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Needs you' })]));
+        body.appendChild(el('ul', { class: 'chk-list' }, problems.map(checkRow)));
+      }
+
+      body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: st.events.length === 1 ? 'Tonight' : 'Tonight\'s events' })]));
+      if (!st.events.length) body.appendChild(el('p', { class: 'muted empty-line', text: 'No events in the next day and a half.' }));
+      st.events.forEach(function (e) {
+        var mine = st.checks.filter(function (c) { return c.scope === e.id && (c.level === 'bad' || c.level === 'warn'); });
+        var lvl = mine.some(function (c) { return c.level === 'bad'; }) ? 'bad' : mine.length ? 'warn' : 'ok';
+        var rows = e.sources.map(function (r) {
+          return el('li', { class: 'ev-chk ' + r.state }, [el('span', { class: 'sdot ' + r.state, 'aria-hidden': 'true' }), el('strong', { text: r.platformName }), el('span', { class: 'muted', text: r.line }), el('span', { class: 'num', text: n(r.valid) + ' tickets' })]);
+        });
+        var ph = e.phones;
+        var phoneLevel = !ph.signedIn ? (e.phase === 'after' ? 'ok' : 'warn') : ph.active || e.phase !== 'doors' ? 'ok' : 'warn';
+        rows.push(el('li', { class: 'ev-chk ' + phoneLevel }, [
+          el('span', { class: 'sdot ' + phoneLevel, 'aria-hidden': 'true' }),
+          el('strong', { text: 'Door phones' }),
+          el('span', { class: 'muted', text: !ph.signedIn ? 'None signed in' : n(ph.signedIn) + ' signed in' + (e.phase === 'doors' ? ' · ' + n(ph.active) + ' active now' : '') }),
+          el('span', { class: 'num', text: ph.list.map(function (d) { return d.name; }).join(', ') }),
+        ]));
+        body.appendChild(el('section', { class: 'ev-status ' + lvl }, [
+          el('a', { class: 'ev-status-head', href: '#/event/' + e.id }, [
+            el('span', { class: 'sdot ' + lvl, 'aria-hidden': 'true' }),
+            el('div', { class: 'evs-name' }, [el('strong', { text: e.name }), el('span', { class: 'muted', text: [e.venue, fmtDoors(e.startsAt)].filter(Boolean).join(' · ') })]),
+            el('span', { class: 'evs-count', text: n(e.checkedIn) + ' in / ' + n(e.valid) }),
+            el('span', { class: 'chev', 'aria-hidden': 'true' }, [ico('chev')]),
+          ]),
+          el('ul', { class: 'ev-chk-list' }, rows),
+        ]));
+      });
+
+      if (notes.length) {
+        body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Good to know' })]));
+        body.appendChild(el('ul', { class: 'chk-list quiet' }, notes.map(checkRow)));
+      }
+
+      body.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Server' })]));
+      body.appendChild(el('dl', { class: 'srv-facts' }, [
+        ['Up since', fmtClock(sv.bootedAt) + ' (' + fmtUptime(sv.uptimeSec) + ')'],
+        ['Sync last ran', sv.syncLastRunAt ? ago(sv.syncLastRunAt) : sv.sync === 'off' ? 'Switched off' : 'Not yet'],
+        ['Memory', sv.memoryMB + ' MB'],
+        ['Data', sv.dbMB + ' MB' + (sv.disk ? ' · disk ' + fmtMB(sv.disk.freeMB) + ' free of ' + fmtMB(sv.disk.totalMB) : '')],
+        ['Version', st.version || 'local'],
+      ].map(function (kv) { return el('div', null, [el('dt', { text: kv[0] }), el('dd', { text: kv[1] })]); })));
+
+      body.appendChild(el('section', { class: 'status-help' }, [
+        el('h2', { text: 'If the server goes down' }),
+        el('p', { text: 'Door phones keep scanning offline with the list they already have, and send their scans when it\'s back. Don\'t sign them out or close the door app. Then in Railway open mojiscanner → Deployments → ⋮ → Restart.' }),
+      ]));
+
+      if (first) { stagger(body.children); first = false; }
+      checked.textContent = 'Checked ' + new Date(st.now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+    }
+
+    async function load() {
+      try { draw(await api('GET', '/api/admin/status', null, { quiet: !first })); }
+      catch (ex) { if (ex.message !== 'Sign in again') down(ex); }
+    }
+    await load();
+    refreshTimer = setInterval(function () { if (document.visibilityState === 'visible') load(); }, 15000);
+  }
 
   // ------------------------------------------------------------------ login
 
@@ -1618,6 +1776,14 @@
       ])),
     ]));
 
+    // What phones call themselves: picked from this list when they sign in.
+    box.appendChild(el('div', { class: 'section-head gap-top' }, [
+      el('h2', { text: 'Door names' }),
+      el('button', { type: 'button', class: 'sm', text: 'Edit names', onclick: function () { editDoorNames(ev); } }),
+    ]));
+    box.appendChild(el('div', { class: 'door-names' }, doorNames(ev).map(function (nm) { return el('span', { class: 'name-chip', text: nm }); })));
+    box.appendChild(el('p', { class: 'muted door-names-note', text: 'Each phone picks one of these when it signs in. Scans show which door let someone in.' }));
+
     var phones = data.devices || [];
     var signedIn = phones.filter(function (d) { return !d.revoked; });
     box.appendChild(el('div', { class: 'section-head gap-top' }, [
@@ -1658,6 +1824,55 @@
     var test = el('div', { class: 'test-body' });
     testBlock(test, ev);
     box.appendChild(el('details', { class: 'howto-fold test-fold gap-top' }, [el('summary', { text: 'Test a code without admitting anyone' }), test]));
+  }
+
+  var DEFAULT_DOOR_NAMES = ['Door 1', 'Door 2', 'VIP', 'Box office'];
+  function doorNames(ev) { return ev.doorNames && ev.doorNames.length ? ev.doorNames : DEFAULT_DOOR_NAMES; }
+
+  // One box per door name: rename, remove, add (up to 8). Phones that are already scanning keep their name.
+  function editDoorNames(ev) {
+    var list = el('div', { class: 'names-edit' });
+    var err = el('p', { class: 'error', role: 'alert' });
+    var save = el('button', { class: 'primary lg', type: 'submit', text: 'Save names' });
+    var add = el('button', { type: 'button', class: 'sm', text: 'Add a name', onclick: function () { row(''); list.lastChild.querySelector('input').focus(); } });
+    function sync() {
+      var rows = list.children.length;
+      add.disabled = rows >= 8;
+      Array.prototype.forEach.call(list.querySelectorAll('.name-row button'), function (b) { b.disabled = rows < 2; });
+    }
+    function row(value) {
+      var input = el('input', { value: value, maxlength: 24, placeholder: 'Door name', 'aria-label': 'Door name', autocomplete: 'off', autocapitalize: 'words' });
+      var line = el('div', { class: 'name-row' }, [input, el('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Remove this name', onclick: function () {
+        var next = line.nextElementSibling || line.previousElementSibling;
+        line.remove();
+        sync();
+        if (next) next.querySelector('input').focus();
+      } }, [ico('x')])]);
+      list.appendChild(line);
+      sync();
+    }
+    function fill(names) { list.textContent = ''; names.forEach(row); }
+    fill(doorNames(ev));
+    var reset = ev.customDoorNames ? el('button', { type: 'button', class: 'text-btn', text: 'Use Door 1, Door 2, VIP, Box office', onclick: function () { fill(DEFAULT_DOOR_NAMES); } }) : null;
+    var close = modal('Door names', el('form', { class: 'names-form', onsubmit: async function (e) {
+      e.preventDefault();
+      err.textContent = '';
+      var names = Array.prototype.map.call(list.querySelectorAll('input'), function (i) { return i.value; });
+      if (!names.some(function (x) { return x.trim(); })) { err.textContent = 'Add at least one door name.'; return; }
+      busy(save, true);
+      try {
+        await api('PATCH', '/api/admin/events/' + ev.id, { doorNames: names });
+        close();
+        toast('Door names saved', 0, 'ok');
+        refreshEvent(true);
+      } catch (ex) { err.textContent = ex.message; busy(save, false); }
+    } }, [
+      el('p', { class: 'muted names-intro', text: 'Phones pick one of these when they sign in. Phones already scanning keep the name they picked.' }),
+      list,
+      el('div', { class: 'names-tools' }, [add, reset]),
+      el('div', { class: 'head-actions' }, [save]),
+      err,
+    ]), null, { small: true });
   }
 
   function changePin(ev) {
