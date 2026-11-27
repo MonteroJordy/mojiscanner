@@ -305,9 +305,9 @@
     if (/no longer on|not in the latest|missing/i.test(s)) return 'Not on the list anymore';
     if (/refund/i.test(s)) return 'Refunded';
     if (/resold|resale/i.test(s)) return 'Resold';
+    if (/cancel/i.test(s)) return 'Canceled';
     if (/transfer/i.test(s)) return 'Transferred';
     if (/return/i.test(s)) return 'Returned';
-    if (/cancel/i.test(s)) return 'Canceled';
     if (/payment plan|unpaid|pending/i.test(s)) return 'Not paid yet';
     return 'No longer valid';
   }
@@ -469,7 +469,8 @@
     var list = $('search-results');
     list.textContent = '';
     $('search-clear').hidden = !q;
-    if (q.length < 2) { $('search-empty').hidden = true; $('search-count').textContent = q ? 'Keep typing' : 'Type a name or email'; return; }
+    $('search-hint').hidden = q.length >= 2;
+    if (q.length < 2) { $('search-empty').hidden = true; $('search-count').textContent = q ? 'Keep typing' : ''; return; }
     var key = Codes.codeKey(q);
     var hits = [];
     tickets.forEach(function (t) {
@@ -506,9 +507,14 @@
       var canUndo = r.result === 'admitted' && row && !r.undone;
       list.appendChild(el('div', { class: 'item' }, [
         el('span', { class: 'time', text: fmtTime(r.at) }),
-        el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
-        r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
-        canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : el('span', { class: 'undo-space' }),
+        el('div', { class: 'what' }, [
+          el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
+          el('div', { class: 'res' }, [
+            r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
+            row && row.p ? el('span', { class: 'plat', text: PLATFORM_NAMES[row.p] || row.p }) : null,
+          ]),
+        ]),
+        canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : null,
       ]));
     });
   }
@@ -624,8 +630,13 @@
       var res = await api('GET', '/api/door/events');
       if (!res.events.length) list.appendChild(el('div', { class: 'event-empty', text: 'No events yet. Create one in the admin first.' }));
       res.events.forEach(function (e) {
+        var t = Date.parse(e.startsAt);
+        var live = !isNaN(t) && Date.now() >= t - 4 * 3600e3 && Date.now() <= t + 10 * 3600e3;
         list.appendChild(el('button', { type: 'button', class: 'event-option', role: 'radio', 'aria-checked': 'false', 'data-id': e.id, onclick: function () { selectEvent(e.id); } }, [
-          el('div', { class: 'grow' }, [el('div', { class: 'name', text: e.name }), el('div', { class: 'when', text: [e.venue, fmtWhen(e.startsAt)].filter(Boolean).join(' · ') || 'No date set' })]),
+          el('div', { class: 'grow' }, [
+            el('div', { class: 'name' }, [e.name, live ? el('span', { class: 'tag ok', text: 'Live now' }) : null]),
+            el('div', { class: 'when', text: [e.venue, fmtWhen(e.startsAt)].filter(Boolean).join(' · ') || 'No date set' }),
+          ]),
           el('div', { class: 'check', text: '✓' }),
         ]));
       });

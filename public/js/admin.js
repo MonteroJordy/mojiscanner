@@ -122,14 +122,18 @@
     } })]);
   }
 
-  function pageHead(crumbs, title, actions) {
-    var crumb = el('span', { class: 'label crumb' });
-    crumbs.forEach(function (c, i) {
-      if (i) crumb.appendChild(document.createTextNode(' / '));
-      crumb.appendChild(c.href ? el('a', { href: c.href, text: c.text }) : document.createTextNode(c.text));
-    });
+  // crumbs: the way back ([{ text, href }]). meta: an optional line under the title.
+  function pageHead(crumbs, title, actions, meta) {
+    var crumb = null;
+    if (crumbs && crumbs.length) {
+      crumb = el('nav', { class: 'crumb', 'aria-label': 'Breadcrumb' });
+      crumbs.forEach(function (c, i) {
+        if (i) crumb.appendChild(el('span', { class: 'sep', text: '/' }));
+        crumb.appendChild(c.href ? el('a', { href: c.href, text: c.text }) : el('span', { text: c.text }));
+      });
+    }
     return el('div', { class: 'page-head' }, [
-      el('div', null, [crumb, el('h1', { text: title })]),
+      el('div', { class: 'ph-text' }, [crumb, el('h1', { text: title }), meta || null]),
       actions && actions.length ? el('div', { class: 'head-actions' }, actions) : null,
     ]);
   }
@@ -194,48 +198,65 @@
   // ------------------------------------------------------------------ events list
 
   function eventStatus(e) {
-    if (e.archived) return ['muted', 'Archived'];
+    if (e.archived) return ['muted', 'Archived', 4];
     var t = Date.parse(e.startsAt);
     var now = Date.now();
     if (!isNaN(t)) {
-      if (now >= t - 4 * 3600e3 && now <= t + 10 * 3600e3) return ['ok', 'Live now'];
-      if (now > t + 10 * 3600e3) return ['muted', 'Ended'];
+      if (now >= t - 4 * 3600e3 && now <= t + 10 * 3600e3) return ['ok', 'Live now', 0];
+      if (now > t + 10 * 3600e3) return ['muted', 'Ended', 3];
     }
-    if (!e.sources) return ['draft', 'Draft'];
-    return ['in', 'Upcoming'];
+    if (!e.sources) return ['draft', 'Draft', 2];
+    return ['in', 'Upcoming', 1];
   }
 
   function platformsLine(list) {
-    if (!list || !list.length) return 'None yet';
-    return list.slice(0, 3).join(' · ') + (list.length > 3 ? ' · +' + (list.length - 3) : '');
+    if (!list || !list.length) return 'No sources yet';
+    return list.slice(0, 3).join(', ') + (list.length > 3 ? ' +' + (list.length - 3) : '');
+  }
+
+  // A thin bar: share of valid tickets checked in. Width is set through the CSSOM (the CSP blocks inline styles).
+  function meter(scanned, valid, cls) {
+    var fill = el('i');
+    fill.style.width = (valid ? Math.min(100, Math.round(100 * scanned / valid)) : 0) + '%';
+    return el('div', { class: 'meter' + (cls ? ' ' + cls : ''), role: 'img', 'aria-label': n(scanned) + ' of ' + n(valid) + ' checked in' }, [fill]);
   }
 
   async function renderEvents() {
     var data;
     try { data = await api('GET', '/api/admin/events'); } catch (e) { return; }
     var main = shell();
-    main.appendChild(pageHead([{ text: 'Moji Door' }], 'Events', [el('button', { type: 'button', class: 'primary', text: 'New event', onclick: newEvent })]));
+    main.appendChild(pageHead([], 'Events', [el('button', { type: 'button', class: 'primary', text: 'New event', onclick: newEvent })]));
     if (!data.events.length) {
-      main.appendChild(el('div', { class: 'empty-card' }, ['Create your first event, then add where its tickets were sold: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV.']));
+      main.appendChild(el('div', { class: 'empty-card' }, [
+        el('p', { text: 'Create your first event, then add where its tickets were sold: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV.' }),
+        el('button', { type: 'button', class: 'primary', text: 'New event', onclick: newEvent }),
+      ]));
       return;
     }
-    var rows = data.events.map(function (e) {
-      var st = eventStatus(e);
-      var open = function () { location.hash = '#/event/' + e.id; };
-      return el('tr', { class: 'click', onclick: function (ev) { if (ev.target.tagName !== 'A' && ev.target.tagName !== 'BUTTON') open(); } }, [
-        el('td', null, [el('a', { class: 'ev-name', href: '#/event/' + e.id, text: e.name })]),
-        el('td', { class: 'hide-sm', text: e.venue || '' }),
-        el('td', { text: e.startsAt ? fmtDate(e.startsAt) : 'No date' }),
-        el('td', null, [el('span', { class: 'tag ' + st[0], text: st[1] })]),
-        el('td', { class: 'num r', text: e.valid || e.scanned ? n(e.scanned) + ' / ' + n(e.valid) : '—' }),
-        el('td', { class: 'muted hide-sm', text: platformsLine(e.platforms) }),
-        el('td', { class: 'r' }, [el('button', { type: 'button', class: 'sm' + (st[1] === 'Live now' ? ' primary' : ''), text: 'Open', onclick: open })]),
+    // Live first, then upcoming (soonest first), drafts, then past events (latest first).
+    var list = data.events.map(function (e) { return { e: e, st: eventStatus(e), t: Date.parse(e.startsAt) || 0 }; });
+    list.sort(function (a, b) {
+      if (a.st[2] !== b.st[2]) return a.st[2] - b.st[2];
+      return a.st[2] >= 3 ? b.t - a.t : a.t - b.t;
+    });
+    var rows = list.map(function (x) {
+      var e = x.e;
+      var st = x.st;
+      var hasTickets = e.valid || e.scanned;
+      return el('a', { class: 'ev-row' + (st[2] === 0 ? ' live' : '') + (st[2] >= 3 ? ' past' : ''), href: '#/event/' + e.id }, [
+        el('div', { class: 'ev-name' }, [el('strong', { text: e.name }), el('span', { class: 'sub', text: e.venue || 'No venue set' })]),
+        el('div', { class: 'ev-when' }, [el('span', { text: e.startsAt ? fmtDate(e.startsAt) : 'No date' }), e.startsAt ? el('span', { class: 'sub', text: fmtDoors(e.startsAt) }) : null]),
+        el('div', { class: 'ev-status' }, [el('span', { class: 'tag ' + st[0], text: st[1] })]),
+        el('div', { class: 'ev-in' }, hasTickets ? [
+          el('span', { class: 'ev-count' }, [el('b', { text: n(e.scanned) }), ' / ' + n(e.valid) + ' in']),
+          meter(e.scanned, e.valid),
+        ] : [el('span', { class: 'sub', text: 'No tickets yet' })]),
+        el('div', { class: 'ev-src sub', text: platformsLine(e.platforms) }),
       ]);
     });
-    main.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data' }, [
-      el('thead', null, [el('tr', null, [['Event'], ['Venue', 'hide-sm'], ['Date'], ['Status'], ['Checked in', 'r'], ['Sources', 'hide-sm'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
-      el('tbody', null, rows),
-    ])]));
+    main.appendChild(el('div', { class: 'ev-list' }, [
+      el('div', { class: 'ev-row ev-head', 'aria-hidden': 'true' }, ['Event', 'Date', 'Status', 'Checked in', 'Sold on'].map(function (h) { return el('span', { class: 'label xs', text: h }); })),
+    ].concat(rows)));
   }
 
   function eventForm(ev, onSaved) {
@@ -283,12 +304,16 @@
     try { data = await api('GET', '/api/admin/events/' + id); } catch (e) { if (e.status === 404) location.hash = ''; return; }
     var main = shell();
     var ev = data.event;
-    var crumbBits = [ev.venue, ev.startsAt ? fmtDate(ev.startsAt) : '', fmtDoors(ev.startsAt)].filter(Boolean).join(' · ');
-    main.appendChild(pageHead([{ text: 'Events', href: '#/' }, { text: crumbBits || 'No date set' }], ev.name + (ev.archived ? ' (archived)' : ''), [
-      el('div', { class: 'pin-chip', title: 'Door staff type this to sign in' }, [el('span', { class: 'label xs', text: 'Door PIN' }), el('b', { text: ev.doorPin || '••••' })]),
+    var st = eventStatus(Object.assign({}, ev, { sources: data.sources.length }));
+    var meta = el('div', { class: 'ph-meta' }, [
+      el('span', { class: 'tag ' + st[0], text: st[1] }),
+      el('span', { text: [ev.venue, ev.startsAt ? fmtDate(ev.startsAt) : 'No date set', fmtDoors(ev.startsAt)].filter(Boolean).join(' · ') }),
+    ]);
+    main.appendChild(pageHead([{ text: 'Events', href: '#/' }], ev.name + (ev.archived ? ' (archived)' : ''), [
+      el('div', { class: 'pin-chip', title: 'Door PIN: door staff type this to sign in' }, [el('span', { class: 'label xs', text: 'PIN' }), el('b', { text: ev.doorPin || '••••' })]),
       el('a', { class: 'btn', href: '/', target: '_blank', rel: 'noopener', text: 'Open door app' }),
       el('button', { type: 'button', text: 'Edit', onclick: function () { var close = modal('Edit event', eventForm(ev, function () { close(); route(); })); } }),
-    ]));
+    ], meta));
 
     var overview = el('div', { id: 'overview' });
     main.appendChild(overview);
@@ -303,84 +328,158 @@
     }, 10000);
   }
 
+  // "Headline\ndetail" (new) or "message — hint" (older) into [headline, detail].
+  function splitMsg(m) {
+    m = String(m || '');
+    var i = m.indexOf('\n');
+    if (i !== -1) return [m.slice(0, i), m.slice(i + 1)];
+    var j = m.indexOf(' — ');
+    if (j !== -1) return [m.slice(0, j), m.slice(j + 3)];
+    return [m, ''];
+  }
+
+  function isStale(s) { return s.kind === 'file' && s.lastSyncAt && Date.now() - new Date(s.lastSyncAt).getTime() > STALE_MS; }
+
+  // What needs doing before doors, each with the button that fixes it.
+  function problems(data) {
+    var ev = data.event;
+    var start = Date.parse(ev.startsAt);
+    var over = !isNaN(start) && Date.now() > start + 10 * 3600e3;
+    var out = [];
+    data.sources.forEach(function (s) {
+      var upload = '#/event/' + ev.id + '/upload/' + s.id;
+      if (s.kind === 'api' && s.lastSyncOk === false) {
+        out.push({ s: s, text: splitMsg(s.lastSyncMessage)[0] || 'The last sync failed.', action: ['Open settings', function () { editApiSource(ev, s); }] });
+      } else if (s.lastSyncMessage && /safety check/.test(s.lastSyncMessage)) {
+        out.push({ s: s, text: 'Some tickets disappeared from ' + s.platformName + '. Voiding them is on hold until you confirm.', action: ['Apply voids', function (e) { if (confirm('Void every ticket that is no longer on ' + s.platformName + '?')) runSync(s, { force: true }, e.target); }] });
+      } else if (s.kind === 'file' && !over) {
+        if (!s.lastSyncAt) out.push({ s: s, text: 'No file uploaded yet.', action: ['Upload file', upload] });
+        else if (isStale(s)) out.push({ s: s, text: 'List uploaded ' + ago(s.lastSyncAt) + '. Upload a fresh export before doors so refunds and resales get caught.', action: ['Upload file', upload] });
+      }
+    });
+    var flags = data.stats.flags || {};
+    if (flags.double_entry) out.push({ text: flags.double_entry + (flags.double_entry === 1 ? ' ticket' : ' tickets') + ' got in twice while a phone was offline.', action: ['Show', showFlagged] });
+    if (flags.voided_after_scan) out.push({ text: flags.voided_after_scan + (flags.voided_after_scan === 1 ? ' ticket was' : ' tickets were') + ' refunded, resold or transferred after the scan.', action: ['Show', showFlagged] });
+    return out;
+  }
+
+  function showFlagged() {
+    var tab = Array.prototype.find.call(document.querySelectorAll('.tabs button'), function (b) { return b.textContent === 'Tickets'; });
+    if (tab && !tab.classList.contains('active')) tab.click();
+    setTimeout(function () {
+      var seg = Array.prototype.find.call(document.querySelectorAll('.seg button'), function (b) { return /^Flagged/.test(b.textContent); });
+      if (seg) { seg.click(); seg.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    }, 50);
+  }
+
   function renderOverview(box, data) {
     var st = data.stats;
     var rows = st.rows || {};
+    var ev = data.event;
     box.textContent = '';
     var pct = st.valid ? Math.round(100 * st.scanned / st.valid) : 0;
-    var platformCount = new Set(data.sources.map(function (s) { return s.platform; })).size;
-    box.appendChild(el('div', { class: 'stats' }, [
-      el('div', null, [el('div', { class: 'label sm', text: 'Checked in' }), el('div', { class: 'n', text: n(st.scanned) }), el('div', { class: 's', text: pct + '% of valid tickets' })]),
-      el('div', null, [el('div', { class: 'label sm', text: 'Valid tickets' }), el('div', { class: 'n', text: n(st.valid) }), el('div', { class: 's', text: 'From ' + platformCount + ' platform' + (platformCount === 1 ? '' : 's') + ' · ' + n(rows.void) + ' void' })]),
-      el('div', null, [el('div', { class: 'label sm', text: 'Not here yet' }), el('div', { class: 'n', text: n(Math.max(0, st.valid - st.scanned)) }), el('div', { class: 's', text: st.lastScanAt ? 'Last scan ' + fmtClock(st.lastScanAt) : 'No scans yet' })]),
+    var phones = (data.devices || []).filter(function (d) { return !d.revoked && d.lastSeenAt && Date.now() - new Date(d.lastSeenAt).getTime() < 15 * 60e3; }).length;
+    function fact(num, text) { return el('span', null, [el('b', { text: num }), text]); }
+    box.appendChild(el('section', { class: 'tally', 'aria-label': 'Check-in' }, [
+      el('div', { class: 'tally-top' }, [
+        el('div', { class: 'tally-count' }, [el('b', { text: n(st.scanned) }), el('span', { class: 'in', text: ' in' }), el('span', { class: 'of', text: ' / ' + n(st.valid) })]),
+        el('div', { class: 'tally-pct' }, [el('b', { text: pct + '%' }), ' checked in']),
+      ]),
+      meter(st.scanned, st.valid, 'big'),
+      el('div', { class: 'tally-facts' }, [
+        fact(n(Math.max(0, st.valid - st.scanned)), ' not here yet'),
+        fact(n(rows.void), ' void'),
+        st.lastScanAt ? el('span', null, ['Last scan ', el('b', { text: fmtClock(st.lastScanAt) })]) : el('span', { text: 'No scans yet' }),
+        fact(n(phones), phones === 1 ? ' door phone active' : ' door phones active'),
+      ]),
     ]));
-    var flags = st.flags || {};
-    if (flags.double_entry || flags.voided_after_scan) {
-      box.appendChild(el('div', { class: 'alert' }, [el('span', { class: 'tag warn', text: 'Check' }), el('div', null, [
-        flags.double_entry ? flags.double_entry + ' ticket(s) got in twice while a phone was offline. ' : '',
-        flags.voided_after_scan ? flags.voided_after_scan + ' ticket(s) were refunded, resold or transferred after they were scanned. ' : '',
-        'Filter the Tickets tab by Flagged to see them.',
-      ])]));
+
+    var issues = problems(data);
+    if (issues.length) {
+      box.appendChild(el('section', { class: 'attention', 'aria-label': 'Needs attention' }, [
+        el('h2', { text: issues.length === 1 ? '1 thing to fix' : issues.length + ' things to fix' }),
+        el('ul', null, issues.map(function (it) {
+          var a = it.action;
+          var btn = typeof a[1] === 'string' ? el('a', { class: 'btn sm', href: a[1], text: a[0] }) : el('button', { type: 'button', class: 'sm', text: a[0], onclick: a[1] });
+          return el('li', null, [it.s ? el('span', { class: 'badge', text: it.s.platformName }) : el('span', { class: 'tag warn', text: 'Check' }), el('span', { class: 'att-text', text: it.text }), btn]);
+        })),
+      ]));
     }
-    box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), el('a', { class: 'btn sm', href: '#/event/' + data.event.id + '/add', text: 'Add source' })]));
+
+    box.appendChild(el('div', { class: 'section-head' }, [el('h2', { text: 'Where tickets were sold' }), el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/add', text: 'Add source' })]));
     var byId = {};
     (st.bySource || []).forEach(function (s) { byId[s.source_id] = s; });
     if (!data.sources.length) {
-      box.appendChild(el('div', { class: 'empty-card gap-bottom' }, ['No sources yet. Add where this event\'s tickets were sold: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV export.']));
+      box.appendChild(el('div', { class: 'empty-card gap-bottom' }, [
+        el('p', { text: 'Add every platform this event sold on: Shotgun, DICE, RA, Bucket Listers, Eventbrite, Posh or any CSV export. Door phones scan all of them.' }),
+        el('a', { class: 'btn primary', href: '#/event/' + ev.id + '/add', text: 'Add source' }),
+      ]));
       return;
     }
-    box.appendChild(el('div', { class: 'sources' }, data.sources.map(function (s) { return sourceCard(data.event, s, byId[s.id] || { valid: 0, scanned: 0, void: 0 }); })));
+    box.appendChild(el('div', { class: 'src-list' }, data.sources.map(function (s) { return sourceRow(ev, s, byId[s.id] || { valid: 0, scanned: 0, void: 0 }); })));
   }
 
-  function sourceStatus(s) {
-    var when = s.lastSyncAt ? fmtClock(s.lastSyncAt) + ' · ' + ago(s.lastSyncAt) : '';
+  // The custom label without a repeated platform name ("Shotgun · Riva Starr @ Sable" → "Riva Starr @ Sable").
+  function sourceLabel(s) {
+    var label = String(s.label || '').trim();
+    if (!label || label === s.platformName || label === s.platformName + ' (file)') return '';
+    var esc = s.platformName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return label.replace(new RegExp('^' + esc + '\\s*[·:|\\-–—]\\s*', 'i'), '') || label;
+  }
+
+  var HOW = { api: 'Pulled by API', file: 'File upload', webhook: 'Webhook' };
+
+  function sourceState(s) {
     if (s.kind === 'api') {
-      if (s.lastSyncOk === false) return [el('span', { class: 'dot bad' }), el('span', { text: 'Last sync failed · ' + ago(s.lastSyncAt) })];
-      if (s.lastSyncAt) return [el('span', { class: 'dot' }), el('span', { text: 'Synced ' + when })];
-      return [el('span', { class: 'dot idle' }), el('span', { text: 'Not synced yet' })];
+      if (s.syncing) return ['idle', 'Syncing…'];
+      if (s.lastSyncOk === false) return ['bad', 'Sync failed ' + ago(s.lastSyncAt)];
+      if (s.lastSyncAt) return ['', 'Synced ' + fmtClock(s.lastSyncAt)];
+      return ['idle', 'Not synced yet'];
     }
     if (s.kind === 'webhook') {
-      if (s.lastSyncOk === false) return [el('span', { class: 'dot bad' }), el('span', { text: 'Last webhook had no tickets · ' + ago(s.lastSyncAt) })];
-      if (s.lastSyncAt) return [el('span', { class: 'dot' }), el('span', { text: 'Last sale received ' + when })];
-      return [el('span', { class: 'dot idle' }), el('span', { text: 'Waiting for the first webhook' })];
+      if (s.lastSyncOk === false) return ['bad', 'Last webhook had no tickets'];
+      if (s.lastSyncAt) return ['', 'Last sale ' + fmtClock(s.lastSyncAt)];
+      return ['idle', 'Waiting for the first sale'];
     }
-    if (!s.lastSyncAt) return [el('span', { class: 'dot idle' }), el('span', { text: 'No file uploaded yet' })];
-    var stale = Date.now() - new Date(s.lastSyncAt).getTime() > STALE_MS;
-    return [stale ? el('span', { class: 'tag stale', text: 'Stale' }) : el('span', { class: 'dot' }), el('span', { text: 'File uploaded ' + when })];
+    if (!s.lastSyncAt) return ['warn', 'No file uploaded yet'];
+    return isStale(s) ? ['warn', 'Uploaded ' + ago(s.lastSyncAt)] : ['', 'Uploaded ' + fmtClock(s.lastSyncAt)];
   }
 
-  function sourceCard(ev, s, counts) {
-    var defaultLabels = [s.platformName, s.platformName + ' (file)'];
-    var custom = s.label && defaultLabels.indexOf(s.label) === -1 ? s.label : '';
-    var safety = s.lastSyncMessage && /safety check/.test(s.lastSyncMessage);
-    var actions = el('div', { class: 'actions' });
+  function sourceRow(ev, s, counts) {
+    var label = sourceLabel(s);
+    var state = sourceState(s);
+    var failed = s.kind === 'api' && s.lastSyncOk === false;
+    var actions = el('div', { class: 'src-actions' });
     if (s.kind === 'api') {
-      actions.appendChild(el('button', { type: 'button', class: 'sm primary', text: 'Sync now', onclick: function (e) { runSync(s, {}, e.target); } }));
+      actions.appendChild(el('button', { type: 'button', class: 'sm', text: 'Sync now', onclick: function (e) { runSync(s, {}, e.target); } }));
       actions.appendChild(el('button', { type: 'button', class: 'sm', text: 'Settings', onclick: function () { editApiSource(ev, s); } }));
-      if (safety) actions.appendChild(el('button', { type: 'button', class: 'sm danger', text: 'Apply voids', onclick: function (e) { if (confirm('Void every ticket that is no longer on ' + s.platformName + '?')) runSync(s, { force: true }, e.target); } }));
     } else if (s.kind === 'webhook') {
-      actions.appendChild(el('button', { type: 'button', class: 'sm primary', text: 'Webhook setup', onclick: function () { webhookSetup(ev, s); } }));
+      actions.appendChild(el('button', { type: 'button', class: 'sm', text: 'Setup', 'aria-label': 'Webhook setup', onclick: function () { webhookSetup(ev, s); } }));
       actions.appendChild(el('a', { class: 'btn sm', href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file' }));
     } else {
-      actions.appendChild(el('a', { class: 'btn sm primary', href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file' }));
+      var due = !s.lastSyncAt || isStale(s);
+      actions.appendChild(el('a', { class: 'btn sm' + (due ? ' primary' : ''), href: '#/event/' + ev.id + '/upload/' + s.id, text: s.lastSyncAt ? 'Upload new file' : 'Upload file' }));
     }
-    actions.appendChild(el('span', { class: 'spacer' }));
-    actions.appendChild(el('button', { type: 'button', class: 'text-btn', text: 'Remove', onclick: async function () {
-      if (!confirm('Remove "' + s.label + '"? Its ' + counts.valid + ' tickets will stop scanning.')) return;
+    actions.appendChild(el('button', { type: 'button', class: 'text-btn', text: 'Remove', 'aria-label': 'Remove ' + s.platformName + (label ? ' ' + label : ''), onclick: async function () {
+      if (!confirm('Remove ' + s.platformName + (label ? ' (' + label + ')' : '') + '? Its ' + counts.valid + ' tickets will stop scanning.')) return;
       await api('DELETE', '/api/admin/sources/' + s.id);
       route();
     } }));
-    var showMsg = s.lastSyncOk === false || safety;
-    return el('div', { class: 'source' }, [
-      el('div', { class: 'head' }, [el('span', { class: 'badge', text: s.platformName }), custom ? el('span', { class: 'lbl', text: custom }) : null, el('span', { class: 'label sm', text: KIND_LABELS[s.kind] || s.kind })]),
-      el('div', { class: 'nums' }, [
-        el('div', null, [el('span', { class: 'label xs', text: 'Valid' }), el('b', { text: n(counts.valid) })]),
-        el('div', null, [el('span', { class: 'label xs', text: 'In' }), el('b', { text: n(counts.scanned) })]),
-        el('div', null, [el('span', { class: 'label xs', text: 'Void' }), el('b', { text: n(counts.void) })]),
+    var msg = failed ? splitMsg(s.lastSyncMessage) : null;
+    return el('div', { class: 'src-row' + (failed ? ' failed' : '') }, [
+      el('div', { class: 'src-id' }, [
+        el('span', { class: 'badge', text: s.platformName }),
+        el('div', { class: 'src-name' }, [label ? el('strong', { text: label }) : null, el('span', { class: 'sub', text: HOW[s.kind] || s.kind })]),
       ]),
-      el('div', { class: 'status', title: s.lastSyncMessage || '' }, sourceStatus(s)),
-      showMsg ? el('div', { class: 'msg' + (s.lastSyncOk === false ? ' bad' : ''), text: s.lastSyncMessage }) : null,
+      el('div', { class: 'src-nums' }, [
+        el('span', null, [el('b', { text: n(counts.valid) }), ' valid']),
+        el('span', null, [el('b', { text: n(counts.scanned) }), ' in']),
+        el('span', { class: counts.void ? '' : 'zero' }, [el('b', { text: n(counts.void) }), ' void']),
+        meter(counts.scanned, counts.valid),
+      ]),
+      el('div', { class: 'src-state' }, [el('span', { class: 'dot ' + state[0] }), el('span', { text: state[1] })]),
       actions,
+      msg ? el('details', { class: 'src-error' }, [el('summary', { text: 'Why it failed' }), el('p', { class: 'lead', text: msg[0] }), msg[1] ? el('p', { text: msg[1] }) : null]) : null,
     ]);
   }
 
@@ -388,8 +487,8 @@
     if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
     try {
       var res = await api('POST', '/api/admin/sources/' + s.id + '/sync', opts);
-      toast((res.ok ? '' : 'Failed: ') + res.message, 7000);
-    } catch (e) { toast(e.message, 7000); }
+      toast(res.ok ? s.platformName + ': ' + res.message : s.platformName + ' sync failed. ' + splitMsg(res.message)[0], 6000);
+    } catch (e) { toast(e.message, 6000); }
     route();
   }
 
@@ -397,11 +496,11 @@
 
   var HELP = {
     shotgun: {
-      api: ['In Shotgun Smartboard go to Settings → Integrations → Shotgun APIs.', 'Copy your Organizer ID and click Generate a token.', 'Find the event ID in the Smartboard address bar when the event is open.', 'Transfers cancel the old QR and issue a new one, so this pulls changes every minute, and right away when the door scans a code it doesn\'t know.'],
+      api: ['In Shotgun Backstage go to Settings → Integrations → Shotgun APIs and click Connect.', 'Copy the Organizer ID, then click Issue token and copy the token.', 'Open the event in Backstage. Its ID is the number at the end of the address (backstage.shotgun.live/events/123456). Pasting the whole address works too.', 'Transfers cancel the old QR and issue a new one, so this pulls changes every minute, and right away when the door scans a code it doesn\'t know.'],
       file: ['Export the attendee list from Smartboard as CSV with the scan code column.'],
     },
     dice: {
-      api: ['In MIO click your company name (bottom left) → Account Settings → Access Tokens.', 'Generate a Ticket holder API token and paste it below.', 'DICE keeps the ticket QR value behind restricted access. Ask your DICE rep to enable restricted fields (ticket code) on your Ticket Holders API token for door access control.', 'DICE creates each QR when the fan activates the ticket in the app, about 2 hours before the event. The list syncs every 2 minutes, and right away when the door scans a code it doesn\'t know.', 'Before the night, activate one test ticket and check it in the door app (More → Test mode). DICE calls its QR "animated": if the test doesn\'t match, DICE tickets need DICE\'s own scanner app (DICE Access) or name search.'],
+      api: ['In MIO click your company name (bottom left) → Manage → Access tokens.', 'Click the token under Ticket holder API access tokens to copy it, and paste it below. Not the Event API token.', 'Click Load my DICE events and pick the show. The event box fills itself.', 'DICE keeps the ticket code behind restricted access. If the first sync says the fields are restricted, ask your DICE rep to enable restricted fields (ticket code) on your Ticket Holders API token for door access control.', 'Fans see their QR in the DICE app about 2 hours before the event. Scan one in the door app with Test mode on (More → Test mode) before doors. DICE calls its QR "animated": if it doesn\'t match, check DICE guests in with Search.'],
       file: ['Ask your DICE rep for the barcode export for this event (the file they give venue scanning systems) and upload it here.', 'Only have a list of names? Upload it with the QR column set to "None in this file". Staff check those guests in by name. Remove it once you have DICE codes, or people count twice.'],
     },
     ra: {
@@ -461,7 +560,7 @@
         var on = state.platform === p;
         return el('button', { type: 'button', class: 'pick' + (on ? ' on' : ''), onclick: function () { state.platform = p; state.kind = PLATFORMS[p].kinds[0]; draw(); } }, [
           el('span', { text: PLATFORMS[p].name }),
-          on ? el('span', { class: 'label', text: 'Selected' }) : added[p] ? el('span', { class: 'label', text: 'Added' }) : null,
+          on ? el('span', { class: 'label', text: 'Selected' }) : added[p] ? el('span', { class: 'label done', text: '✓ Added' }) : null,
         ]);
       }))));
       right.textContent = '';
@@ -472,7 +571,7 @@
       }
       var p = state.platform;
       var kinds = PLATFORMS[p].kinds;
-      left.appendChild(step(2, 'How tickets get in', el('div', { class: 'pick-grid' }, kinds.map(function (k, i) {
+      if (kinds.length > 1) left.appendChild(step(2, 'How tickets get in', el('div', { class: 'pick-grid' }, kinds.map(function (k, i) {
         var on = state.kind === k;
         return el('button', { type: 'button', class: 'pick kind' + (on ? ' on' : ''), onclick: function () { state.kind = k; draw(); } }, [
           el('div', { class: 'top' }, [el('span', { text: KIND_NAMES[k] }), i === 0 && kinds.length > 1 ? el('span', { class: 'label', text: 'Recommended' }) : null]),
@@ -480,7 +579,7 @@
         ]);
       }))));
       var title = state.kind === 'api' ? 'Connect ' + PLATFORMS[p].name : state.kind === 'file' ? 'Upload from ' + PLATFORMS[p].name : 'Webhook from ' + PLATFORMS[p].name;
-      left.appendChild(step(3, title, sourceForm(ev, p, state.kind, null)));
+      left.appendChild(step(kinds.length > 1 ? 3 : 2, title, sourceForm(ev, p, state.kind, null)));
       afterNotes(p, state.kind).forEach(function (t) { right.appendChild(el('p', { text: t })); });
     }
     draw();
@@ -540,6 +639,15 @@
       submit.disabled = true;
       var config = {};
       Object.keys(inputs).forEach(function (k) { config[k] = inputs[k].type === 'checkbox' ? inputs[k].checked : inputs[k].value; });
+      if (platform === 'dice' && config.eventId && /^[A-Za-z0-9_\-]{30,}$/.test(config.eventId.trim())) {
+        err.textContent = 'That looks like an access token, not a DICE event ID. Click Load my DICE events and pick the show.';
+        submit.disabled = false;
+        return;
+      }
+      if ((platform === 'shotgun' || platform === 'eventbrite') && config.eventId && !/^\s*\d+\s*$/.test(config.eventId)) {
+        var runs = String(config.eventId).match(/\d{4,}/g);
+        if (runs) { config.eventId = runs[runs.length - 1]; inputs.eventId.value = config.eventId; }
+      }
       try {
         if (existing) {
           await api('PATCH', '/api/admin/sources/' + existing.id, { label: label.value, config: config });
@@ -800,9 +908,9 @@
     if (/missing|no longer|not in the latest/i.test(s)) return 'Not on list';
     if (/refund/i.test(s)) return 'Refunded';
     if (/resold|resale/i.test(s)) return 'Resold';
+    if (/cancel/i.test(s)) return 'Canceled';
     if (/transfer/i.test(s)) return 'Transferred';
     if (/return/i.test(s)) return 'Returned';
-    if (/cancel/i.test(s)) return 'Canceled';
     return 'Void';
   }
 
@@ -823,15 +931,15 @@
       var res = await api('GET', '/api/admin/events/' + ev.id + '/tickets?limit=200&q=' + encodeURIComponent(q.value) + '&status=' + status);
       list.textContent = '';
       if (!res.tickets.length) { list.appendChild(el('p', { class: 'muted', text: 'No tickets match.' })); return; }
-      list.appendChild(el('table', { class: 'data' }, [
-        el('thead', null, [el('tr', null, [['Guest'], ['Ticket type', 'hide-sm'], ['Platform', 'hide-sm'], ['Email', 'hide-sm'], ['QR', 'hide-sm'], ['Status'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
+      list.appendChild(el('table', { class: 'data tickets' }, [
+        el('thead', null, [el('tr', null, [['Guest'], ['Ticket type', 'hide-sm'], ['Platform', 'hide-sm'], ['Email', 'hide-sm'], ['Status'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
         el('tbody', null, res.tickets.map(function (t) {
-          var statusCell = t.status === 'void' ? el('span', { class: 'tag void', title: t.voidReason || '', text: 'VOID · ' + shortVoid(t.voidReason) })
-            : t.scannedAt ? el('span', { class: 'tag in', text: 'IN ' + fmtClock(t.scannedAt) + (t.scannedBy ? ' · ' + t.scannedBy : '') })
-            : el('span', { class: 'muted', text: 'Not here' });
+          var statusCell = t.status === 'void' ? el('span', { class: 'tag void', title: t.voidReason || '', text: 'Void · ' + shortVoid(t.voidReason) })
+            : t.scannedAt ? el('span', { class: 'state' }, [el('span', { class: 'dot' }), el('span', null, ['In ' + fmtClock(t.scannedAt), t.scannedBy ? el('span', { class: 'by', text: ' · ' + t.scannedBy }) : null])])
+            : el('span', { class: 'state muted' }, [el('span', { class: 'dot idle' }), 'Not here']);
           var action = null;
           if (t.status === 'valid' && !t.scannedAt) {
-            action = el('button', { type: 'button', class: 'xs primary', text: 'Admit', onclick: async function (e) {
+            action = el('button', { type: 'button', class: 'xs', text: 'Admit', 'aria-label': 'Admit ' + (t.holderName || 'guest'), onclick: async function (e) {
               e.target.disabled = true;
               try {
                 var r = await api('POST', '/api/admin/events/' + ev.id + '/admit', { ticketId: t.id });
@@ -843,11 +951,10 @@
             action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', onclick: async function () { await api('POST', '/api/admin/tickets/' + t.id + '/undo', {}); load(); } });
           }
           return el('tr', null, [
-            el('td', null, [el('strong', { text: t.holderName || '(no name)' }), el('span', { class: 'sub show-sm', text: [t.ticketType, platformName(t.platform), isMadeUp(t.code) ? 'no QR' : ''].filter(Boolean).join(' · ') })]),
+            el('td', { class: 'guest' }, [el('strong', { text: t.holderName || '(no name)' }), isMadeUp(t.code) ? el('span', { class: 'tag noqr', title: 'This list had no QR codes: check this guest in by name', text: 'no QR' }) : null, el('span', { class: 'sub show-sm', text: [t.ticketType, platformName(t.platform)].filter(Boolean).join(' · ') })]),
             el('td', { class: 'hide-sm', text: t.ticketType || '' }),
-            el('td', { class: 'hide-sm' }, [el('span', { class: 'badge', text: platformName(t.platform) })]),
+            el('td', { class: 'hide-sm' }, [el('span', { class: 'badge sm', text: platformName(t.platform) })]),
             el('td', { class: 'email hide-sm', text: t.holderEmail || '' }),
-            el('td', { class: 'hide-sm' }, [isMadeUp(t.code) ? el('span', { class: 'tag noqr', text: 'no QR' }) : 'Yes']),
             el('td', null, [statusCell, t.flag ? el('span', { class: 'tag flag', text: t.flag.replace(/_/g, ' ') }) : null]),
             el('td', { class: 'r' }, [action]),
           ]);
@@ -866,8 +973,8 @@
     var res = await api('GET', '/api/admin/events/' + ev.id + '/scans?limit=300');
     if (!res.scans.length) { box.appendChild(el('p', { class: 'muted', text: 'No scans yet.' })); return; }
     var labels = { admitted: ['ok', 'Admitted'], duplicate: ['dup', 'Already scanned'], void: ['void', 'Not valid'], not_found: ['warn', 'Not found'], undo: ['muted', 'Undone'] };
-    box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data' }, [
-      el('thead', null, [el('tr', null, ['Time', 'Result', 'Guest', 'Door', 'How'].map(function (h) { return el('th', { text: h }); }))]),
+    box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data scans' }, [
+      el('thead', null, [el('tr', null, [['Time'], ['Result'], ['Guest'], ['Door'], ['How', 'hide-sm']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
       el('tbody', null, res.scans.map(function (s) {
         var l = labels[s.result] || ['muted', s.result];
         return el('tr', null, [
@@ -875,27 +982,35 @@
           el('td', null, [el('span', { class: 'tag ' + l[0], text: l[1] }), s.note ? el('span', { class: 'sub', text: s.note.replace(/_/g, ' ') }) : null]),
           el('td', null, [s.holder_name ? el('strong', { text: s.holder_name }) : (s.code_raw ? el('span', { class: 'mono', text: String(s.code_raw).slice(0, 40) }) : ''), el('span', { class: 'sub', text: [s.ticket_type, s.platform ? platformName(s.platform) : ''].filter(Boolean).join(' · ') })]),
           el('td', { text: s.device_name || '' }),
-          el('td', { class: 'muted', text: s.method + (s.offline ? ' · offline' : '') }),
+          el('td', { class: 'muted hide-sm', text: ({ camera: 'Camera', manual: 'Typed', search: 'Search', scanner: 'Handheld scanner' }[s.method] || s.method) + (s.offline ? ' · offline' : '') }),
         ]);
       })),
     ])]));
   }
 
+  // Mirrors the door's result screens, without admitting anyone.
+  function verdictCard(kind, word, title, detail) {
+    var tag = { admitted: 'ok', duplicate: 'dup', void: 'void', not_found: 'warn' }[kind];
+    return el('div', { class: 'verdict ' + kind }, [el('span', { class: 'tag ' + tag, text: word }), el('div', null, [el('strong', { text: title }), el('span', { class: 'sub', text: detail })])]);
+  }
+
   function testTab(box, ev) {
-    var input = el('input', { class: 'search', placeholder: 'Paste or type what a QR contains', spellcheck: 'false' });
+    var input = el('input', { class: 'search', placeholder: 'Paste or type what a QR contains', spellcheck: 'false', 'aria-label': 'Ticket code' });
     var out = el('div');
-    box.appendChild(el('p', { class: 'muted', text: 'Scan a ticket with any QR reader app and paste the text here to check it matches. Nobody gets admitted.' }));
+    box.appendChild(el('p', { class: 'muted tab-intro', text: 'Check a code without admitting anyone. Scan the ticket with any QR reader app and paste the text here, or type the number printed under the QR.' }));
     box.appendChild(el('form', { class: 'toolbar-row', onsubmit: async function (e) {
       e.preventDefault();
       var res = await api('POST', '/api/admin/events/' + ev.id + '/lookup', { code: input.value });
       out.textContent = '';
-      out.appendChild(el('p', { class: 'muted' }, ['Tried: ', el('span', { class: 'mono', text: res.keys.join('  |  ') || '(empty)' })]));
-      if (!res.tickets.length) { out.appendChild(el('p', { class: 'error', text: 'No ticket has this code. If it came from a URL or has extra characters, check the source export uses the same value.' })); return; }
+      if (!res.tickets.length) {
+        out.appendChild(verdictCard('not_found', 'Not found', 'No ticket for this event has this code', 'If it came from a link or has extra characters, check that the platform export uses the same value. Tried: ' + (res.keys.join(', ') || '(empty)')));
+        return;
+      }
       res.tickets.forEach(function (t) {
-        out.appendChild(el('div', { class: 'source' }, [
-          el('div', { class: 'head' }, [el('strong', { text: t.holderName || '(no name)' }), el('span', { class: 'badge', text: platformName(t.platform) })]),
-          el('div', { class: 'muted', text: [t.ticketType, t.status === 'void' ? 'VOID: ' + (t.voidReason || '') : t.scannedAt ? 'Scanned ' + fmtClock(t.scannedAt) + ' by ' + (t.scannedBy || '?') : 'Valid, not scanned'].filter(Boolean).join(' · ') }),
-        ]));
+        var kind = t.status === 'void' ? 'void' : t.scannedAt ? 'duplicate' : 'admitted';
+        var word = { void: 'Not valid', duplicate: 'Already scanned', admitted: 'Would admit' }[kind];
+        var detail = t.status === 'void' ? (t.voidReason || 'Void') : t.scannedAt ? 'Scanned ' + fmtClock(t.scannedAt) + (t.scannedBy ? ' at ' + t.scannedBy : '') : 'Valid, not scanned yet';
+        out.appendChild(verdictCard(kind, word, t.holderName || '(no name)', [t.ticketType, platformName(t.platform), detail].filter(Boolean).join(' · ')));
       });
     } }, [input, el('button', { class: 'primary', type: 'submit', text: 'Check' })]));
     box.appendChild(out);
