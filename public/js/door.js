@@ -34,8 +34,18 @@
   var audioCtx = null;
   var syncTimer = null;
   var hardwareListening = false;
-  var selectedEventId = null;
   var testShowing = false;
+  var lastAdmit = null;          // { id, name, at }: the undo bar on the scan screen
+
+  // sign-in: 01 PIN → 02 event and door
+  var pinValue = '';
+  var pinLengths = [4];
+  var doorEventsList = [];       // tonight's and upcoming events (no PIN needed to list them)
+  var unlocked = [];             // events the typed PIN opens, with ticket and platform counts
+  var setupEventId = null;
+  var targetEvent = null;        // "Pick another": the event whose PIN we're asking for
+  var unlocking = false;
+  var deviceChoice = load('door.deviceName');
 
   // ------------------------------------------------------------------ utils
 
@@ -51,6 +61,7 @@
     var d = new Date(iso);
     return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   }
+  function fmtShort(iso) { return fmtTime(iso).replace(/\s?[AP]M$/i, ''); }
   function fmtWhen(iso) {
     if (!iso) return '';
     var d = new Date(iso);
@@ -197,13 +208,13 @@
     var loading = cursor.rev === 0 && tickets.size === 0;
     var state = !online ? 'offline' : syncError ? 'error' : loading ? 'loading' : 'online';
     $('net').className = 'net ' + state;
-    $('sync-text').textContent = state === 'offline' ? 'Offline' + (queued ? ' · ' + queued + ' queued' : '')
+    $('sync-text').textContent = state === 'offline' ? 'Offline' + (queued ? ' · ' + queued + ' saved' : '')
       : state === 'error' ? 'Sync error'
       : state === 'loading' ? 'Loading list'
       : queued ? 'Online · ' + queued + ' to sync'
       : 'Online';
     $('sync-title').textContent = lastSyncAt ? 'Synced ' + fmtTime(new Date(lastSyncAt).toISOString()) : 'Not synced yet';
-    $('data-status').textContent = tickets.size.toLocaleString() + ' tickets on this phone · ' + queued + ' waiting' + (syncError ? ' · ' + syncError : '') + (!online ? ' · offline' : '');
+    $('data-status').textContent = tickets.size.toLocaleString() + ' tickets · ' + queued + ' waiting' + (syncError ? ' · ' + syncError : '') + (!online ? ' · offline' : '');
   }
 
   async function flushOutbox() {
@@ -257,8 +268,9 @@
   async function handleCode(raw, method, ticketId) {
     if (!session || handling) return;
     if (!$('result').hidden) {
-      // A handheld scanner or a deliberate action moves straight on to the next guest.
-      if (method === 'camera') return;
+      // ADMIT moves on with the next QR; problems stay until Done, a tap or the timer.
+      // A handheld scanner or a deliberate action always moves on.
+      if (method === 'camera' && (!$('result').classList.contains('admitted') || raw === lastCode)) return;
       dismissResult();
     }
     if (testShowing && method === 'camera') return; // a test result is on screen: "Scan another" first
@@ -322,7 +334,6 @@
     $('r-glyph').className = 'r-glyph' + (glyph.length > 1 ? ' small' : '');
     $('r-verdict').innerHTML = WORDS[res] || '';
     $('r-offline').hidden = !out.offline;
-    $('r-where').textContent = (session ? session.device.name + ' · ' : '') + fmtTime(new Date().toISOString());
 
     var name = '', line1 = '', line2 = '';
     var platform = r ? (PLATFORM_NAMES[r.p] || r.p) : '';
@@ -330,6 +341,7 @@
       name = r ? (r.n || 'Ticket holder') : '';
       line1 = r && r.y ? r.y : '';
       line2 = out.offline ? 'Saved on this phone. Syncs when back online.' : '';
+      if (r) { lastAdmit = { id: r.id, name: name, at: new Date().toISOString() }; renderLastAdmit(); }
     } else if (res === 'duplicate') {
       name = r ? (r.n || 'Ticket holder') : '';
       line1 = r && r.a ? 'First scanned ' + fmtTime(r.a) + (r.b ? (/scanner$/i.test(r.b) ? ' by ' : ' at ') + r.b : '') : 'Already used';
@@ -341,7 +353,7 @@
       line2 = (why && why.toLowerCase() !== line1.toLowerCase() ? why.replace(/\.?$/, '. ') : '') + 'Do not admit.';
     } else if (res === 'not_found') {
       line1 = out.rechecking ? 'Checking the ticket platforms.' : 'Not on any list.';
-      line2 = out.rechecking ? 'Scan again in 10 seconds.' : 'Try Search by name.';
+      line2 = out.rechecking ? 'Scan again in 10 seconds.' : 'Ask for their name or email.';
     }
     $('r-who').textContent = name;
     $('r-who').hidden = !name;
@@ -351,12 +363,12 @@
     $('r-what').hidden = !line2;
     $('r-platform').textContent = platform;
     $('r-badge-row').hidden = !(res === 'admitted' && platform);
+    $('r-actions').hidden = res === 'admitted';
     $('r-search').hidden = !(res === 'not_found' && !out.rechecking);
 
     box.hidden = false;
     feedback(res);
     var dur = res === 'admitted' ? 1500 : 4000;
-    $('r-closes').textContent = 'Closes in ' + (dur / 1000) + ' s';
     var fill = $('r-fill');
     fill.style.transition = 'none';
     fill.style.width = '100%';
@@ -365,6 +377,15 @@
     fill.style.width = '0%';
     clearTimeout(resultTimer);
     resultTimer = setTimeout(dismissResult, dur);
+    // Keep the camera reading during ADMIT so the next guest's QR can come straight in.
+    if (res === 'admitted' && scanner && pagesClosed()) scanner.resume();
+  }
+
+  function renderLastAdmit() {
+    var box = $('last-admit');
+    if (!lastAdmit || settings.test) { box.hidden = true; return; }
+    $('last-admit-text').textContent = lastAdmit.name + ' admitted · ' + fmtShort(lastAdmit.at);
+    box.hidden = false;
   }
 
   function dismissResult() {
@@ -376,9 +397,10 @@
   // ------------------------------------------------------------------ test mode
 
   function applyTestMode() {
-    $('scan-card').hidden = !!settings.test;
+    $('scan').classList.toggle('test-mode', !!settings.test);
     $('test-banner').hidden = !settings.test;
     if (!settings.test) closeTest();
+    renderLastAdmit();
   }
 
   function showTest(raw) {
@@ -389,17 +411,15 @@
     $('t-raw').textContent = raw;
     var rows = $('t-rows');
     rows.textContent = '';
-    function kv(k, v) { rows.appendChild(el('div', { class: 'kv' }, [el('span', { class: 'label sm', text: k }), v])); }
+    function kv(k, v) { rows.appendChild(el('div', { class: 'kv' }, [el('span', { class: 'k', text: k }), v])); }
     kv('On the list', el('span', { class: 'v yes', text: r ? 'YES' : 'NO' }));
     if (r) {
       kv('Guest', el('span', { class: 'v', text: [r.n || 'Ticket holder', r.y].filter(Boolean).join(' · ') }));
       kv('Platform', el('span', { class: 'v', text: PLATFORM_NAMES[r.p] || r.p }));
-      kv('Status', el('span', { class: 'v', text: r.s !== 'valid' ? 'Void · ' + voidReason(r.v) : r.a ? 'Valid · scanned ' + fmtTime(r.a) : 'Valid · not scanned yet' }));
+      kv('Status', el('span', { class: 'v', text: r.s !== 'valid' ? 'Void · ' + voidReason(r.v) : r.a ? 'Valid · scanned ' + fmtTime(r.a) : 'Valid · not scanned' }));
     }
     var tag = TAGS[local.result];
     kv('Door would show', el('span', { class: 'v' }, [el('span', { class: 'tag ' + tag[0], text: tag[1] })]));
-    $('round-btns').hidden = true;
-    $('big-btns').hidden = true;
     $('test-sheet').hidden = false;
     $('scan').classList.add('testing');
     feedback(local.result === 'admitted' ? 'admitted' : 'other');
@@ -409,8 +429,6 @@
     testShowing = false;
     $('test-sheet').hidden = true;
     $('scan').classList.remove('testing');
-    $('big-btns').hidden = false;
-    $('round-btns').hidden = !!settings.nocamera;
     lastCode = '';
     if (scanner && pagesClosed() && $('result').hidden) scanner.resume();
   }
@@ -424,6 +442,8 @@
       var t = tickets.get(ticketId);
       if (t) rowsForKey(t.k).forEach(function (x) { x.a = null; x.b = null; });
       recent.forEach(function (r) { if (r.row && r.row.id === ticketId && r.result === 'admitted') r.undone = true; });
+      if (lastAdmit && lastAdmit.id === ticketId) lastAdmit = null;
+      renderLastAdmit();
       renderCounts();
       renderRecent();
       toast('Undone. That ticket can be scanned again.');
@@ -464,25 +484,42 @@
 
   // ------------------------------------------------------------------ search / type code / more
 
+  // A typed code (no spaces, has a digit) is checked like a scan; names and emails just filter the list.
+  function looksLikeCode(raw) { return raw.length >= 4 && !/\s|@/.test(raw) && /\d/.test(raw); }
+
+  function checkTypedCode(raw) {
+    closePages(true);
+    lastCode = '';
+    handleCode(raw, 'manual');
+  }
+
   function renderSearch() {
-    var q = $('search-input').value.trim().toLowerCase();
+    var raw = $('search-input').value.trim();
+    var q = raw.toLowerCase();
     var list = $('search-results');
+    var empty = $('search-empty');
     list.textContent = '';
+    empty.textContent = '';
+    empty.hidden = true;
     $('search-clear').hidden = !q;
-    $('search-hint').hidden = q.length >= 2;
-    if (q.length < 2) { $('search-empty').hidden = true; $('search-count').textContent = q ? 'Keep typing' : ''; return; }
+    $('search-order').hidden = true;
+    if (q.length < 2) { $('search-count').textContent = q ? 'Keep typing' : ''; return; }
+    // The exact code under a QR finds that ticket directly, ahead of everything else.
+    var exact = new Set();
+    Codes.candidateKeys(raw).forEach(function (k) { rowsForKey(k).forEach(function (t) { exact.add(t.id); }); });
     var key = Codes.codeKey(q);
     var hits = [];
     tickets.forEach(function (t) {
-      if ((t.n && t.n.toLowerCase().indexOf(q) !== -1) || (t.e && t.e.toLowerCase().indexOf(q) !== -1) || (!isMadeUp(t) && t.k && t.k.indexOf(key) !== -1)) hits.push(t);
+      if (exact.has(t.id) || (t.n && t.n.toLowerCase().indexOf(q) !== -1) || (t.e && t.e.toLowerCase().indexOf(q) !== -1) || (!isMadeUp(t) && t.k && t.k.indexOf(key) !== -1)) hits.push(t);
     });
-    hits.sort(function (a, b) { return String(a.n || '').localeCompare(String(b.n || '')); });
-    $('search-empty').hidden = hits.length > 0;
-    $('search-count').textContent = hits.length + (hits.length === 1 ? ' guest' : ' guests') + (hits.length > 60 ? ' · showing 60' : '');
+    function rank(t) { return exact.has(t.id) ? 0 : t.s !== 'valid' ? 3 : t.a ? 2 : 1; } // not in yet first
+    hits.sort(function (a, b) { return rank(a) - rank(b) || String(a.n || '').localeCompare(String(b.n || '')); });
+    $('search-count').textContent = hits.length ? hits.length + (hits.length === 1 ? ' guest' : ' guests') + (hits.length > 60 ? ' · first 60' : '') : '';
+    $('search-order').hidden = hits.length < 2;
     hits.slice(0, 60).forEach(function (t) {
-      var right = t.s !== 'valid' ? el('span', { class: 'tag void', text: 'VOID' })
-        : t.a ? el('span', { class: 'tag in', text: 'IN ' + fmtTime(t.a) })
-        : el('button', { type: 'button', class: 'primary admit', text: 'Admit', onclick: function () { closePages(); handleCode(null, 'search', t.id); } });
+      var right = t.s !== 'valid' ? el('span', { class: 'void-tag', text: 'VOID' })
+        : t.a ? el('span', { class: 'in-tag', text: 'IN ' + fmtTime(t.a) })
+        : el('button', { type: 'button', class: 'primary admit', text: 'Admit', 'aria-label': 'Admit ' + (t.n || 'guest'), onclick: function () { closePages(true); handleCode(null, 'search', t.id); } });
       list.appendChild(el('li', null, [
         el('div', { class: 'who' }, [
           el('div', { class: 'nm' }, [t.n || '(no name)', isMadeUp(t) ? el('span', { class: 'tag noqr', text: 'no QR' }) : null]),
@@ -491,6 +528,15 @@
         right,
       ]));
     });
+    if (!hits.length) {
+      empty.hidden = false;
+      if (looksLikeCode(raw)) {
+        empty.appendChild(el('p', { text: 'No guest on this phone has that code. It may be a ticket sold in the last few minutes.' }));
+        empty.appendChild(el('button', { type: 'button', class: 'primary check-code', text: 'Check code ' + raw.toUpperCase(), onclick: function () { checkTypedCode(raw); } }));
+      } else {
+        empty.appendChild(el('p', { text: 'No guests match. Check the spelling, or try their email.' }));
+      }
+    }
   }
 
   function resultTag(result) {
@@ -506,35 +552,15 @@
       var row = r.row;
       var canUndo = r.result === 'admitted' && row && !r.undone;
       list.appendChild(el('div', { class: 'item' }, [
-        el('span', { class: 'time', text: fmtTime(r.at) }),
-        el('div', { class: 'what' }, [
-          el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
-          el('div', { class: 'res' }, [
-            r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
-            row && row.p ? el('span', { class: 'plat', text: PLATFORM_NAMES[row.p] || row.p }) : null,
-          ]),
-        ]),
-        canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : null,
+        el('span', { class: 'time', text: fmtShort(r.at) }),
+        el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
+        r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
+        canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : el('span', { class: 'undo-space' }),
       ]));
     });
   }
 
-  function renderManualRecent() {
-    var box = $('manual-recent');
-    box.textContent = '';
-    var typed = recent.filter(function (r) { return r.method === 'manual'; }).slice(0, 6);
-    if (!typed.length) return;
-    box.appendChild(el('div', { class: 'label sm', text: 'Recent' }));
-    typed.forEach(function (r) {
-      box.appendChild(el('div', { class: 'item' }, [
-        el('span', { class: 'code', text: String(r.raw || '') }),
-        resultTag(r.result),
-        el('span', { class: 'label sm', text: fmtTime(r.at) }),
-      ]));
-    });
-  }
-
-  function pagesClosed() { return $('search').hidden && $('manual').hidden && $('menu').hidden; }
+  function pagesClosed() { return $('search').hidden && $('menu').hidden; }
 
   function openPage(id) {
     closePages(true);
@@ -542,7 +568,7 @@
     show(id);
   }
   function closePages(keepPaused) {
-    ['search', 'manual', 'menu'].forEach(hide);
+    ['search', 'menu'].forEach(hide);
     if (!keepPaused && scanner && $('result').hidden && !testShowing) scanner.resume();
   }
 
@@ -555,8 +581,8 @@
     $('scanner-mode').hidden = !noCam;
     $('frame').hidden = noCam;
     $('scan-hint').hidden = noCam;
-    $('round-btns').hidden = noCam || testShowing;
-    if (noCam) { if (scanner) scanner.stopCamera(); return; }
+    $('btn-camera').hidden = noCam;
+    if (noCam) { $('btn-torch').hidden = true; if (scanner) scanner.stopCamera(); return; }
     if (!scanner) scanner = new window.DoorScanner($('video'), function (text, method) { handleCode(text, method); });
     try {
       var info = await scanner.start();
@@ -574,109 +600,163 @@
     try { if ('wakeLock' in navigator && document.visibilityState === 'visible') wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { wakeLock = null; }
   }
 
-  // ------------------------------------------------------------------ sign in
+  // ------------------------------------------------------------------ 01 door PIN
+
+  function maxPinLen() { return Math.max.apply(null, pinLengths.concat([4])); }
 
   function renderPinBoxes() {
-    var input = $('login-pin');
-    var len = input.value.length;
-    var focused = document.activeElement === input;
-    var boxes = Math.max(4, len);
+    var len = Math.max(maxPinLen(), pinValue.length);
     var wrap = $('pin-boxes');
+    wrap.style.setProperty('--pin-len', String(len));
     wrap.textContent = '';
-    for (var i = 0; i < boxes; i++) {
-      wrap.appendChild(el('div', { class: 'pin-box' + (focused && i === len ? ' cursor' : ''), text: i < len ? '●' : '' }));
-    }
+    for (var i = 0; i < len; i++) wrap.appendChild(el('div', { class: 'pin-box' + (i < pinValue.length ? ' filled' : '') }));
   }
 
-  function renderDeviceChips() {
-    var wrap = $('device-chips');
-    var current = $('login-device').value.trim();
-    wrap.textContent = '';
-    DEVICE_NAMES.forEach(function (name) {
-      wrap.appendChild(el('button', { type: 'button', class: 'chip' + (current === name ? ' on' : ''), text: name, onclick: function () { $('login-device').value = name; renderDeviceChips(); } }));
-    });
+  function setPinTitle(forEvent) {
+    var title = $('pin-title');
+    title.textContent = '';
+    if (forEvent) { title.appendChild(document.createTextNode('Enter the PIN for')); title.appendChild(el('br')); title.appendChild(document.createTextNode(forEvent.name)); }
+    else { title.appendChild(document.createTextNode('Enter tonight’s')); title.appendChild(el('br')); title.appendChild(document.createTextNode('door PIN')); }
+    $('pin-sub').textContent = forEvent ? [forEvent.venue, fmtWhen(forEvent.startsAt)].filter(Boolean).join(' · ') || 'The promoter has it on the event page.' : 'The promoter has it on the event page.';
   }
 
-  function selectEvent(id) {
-    selectedEventId = id;
-    Array.prototype.forEach.call(document.querySelectorAll('.event-option'), function (b) {
-      var on = b.getAttribute('data-id') === id;
-      b.classList.toggle('selected', on);
-      b.setAttribute('aria-checked', on ? 'true' : 'false');
-    });
-  }
-
-  function pickDefaultEvent(events) {
-    if (events.length === 1) return events[0].id;
-    var now = Date.now();
-    var tonight = events.filter(function (e) {
-      var t = Date.parse(e.startsAt);
-      return !isNaN(t) && t - now < 24 * 3600e3 && now - t < 12 * 3600e3;
-    });
-    return tonight.length === 1 ? tonight[0].id : null;
-  }
-
-  async function showLogin(message) {
-    hide('scan');
-    show('login');
-    $('login-error').textContent = message || '';
-    $('login-device').value = load('door.deviceName') || '';
-    renderDeviceChips();
+  async function showPin(message, forEvent) {
+    ['scan', 'setup', 'pick'].forEach(hide);
+    show('pin');
+    targetEvent = forEvent || null;
+    pinValue = '';
+    setPinTitle(targetEvent);
+    $('pin-error').textContent = message || '';
     renderPinBoxes();
-    var list = $('login-events');
-    list.textContent = '';
-    selectedEventId = null;
     try {
       var res = await api('GET', '/api/door/events');
-      if (!res.events.length) list.appendChild(el('div', { class: 'event-empty', text: 'No events yet. Create one in the admin first.' }));
-      res.events.forEach(function (e) {
-        var t = Date.parse(e.startsAt);
-        var live = !isNaN(t) && Date.now() >= t - 4 * 3600e3 && Date.now() <= t + 10 * 3600e3;
-        list.appendChild(el('button', { type: 'button', class: 'event-option', role: 'radio', 'aria-checked': 'false', 'data-id': e.id, onclick: function () { selectEvent(e.id); } }, [
-          el('div', { class: 'grow' }, [
-            el('div', { class: 'name' }, [e.name, live ? el('span', { class: 'tag ok', text: 'Live now' }) : null]),
-            el('div', { class: 'when', text: [e.venue, fmtWhen(e.startsAt)].filter(Boolean).join(' · ') || 'No date set' }),
-          ]),
-          el('div', { class: 'check', text: '✓' }),
-        ]));
-      });
-      var def = pickDefaultEvent(res.events);
-      if (def) selectEvent(def);
+      doorEventsList = res.events || [];
+      pinLengths = (res.pinLengths && res.pinLengths.length) ? res.pinLengths : [4];
+      renderPinBoxes();
+      if (!doorEventsList.length && !message) $('pin-error').textContent = 'No events are open for scanning yet. Create one in the admin first.';
     } catch (e) {
-      $('login-error').textContent = 'Could not reach the server. Check the connection.';
+      if (!message) $('pin-error').textContent = 'Could not reach the server. Check the connection.';
     }
   }
 
-  async function login(ev) {
-    ev.preventDefault();
-    $('login-error').textContent = '';
-    if (!selectedEventId) { $('login-error').textContent = 'Pick the event first.'; return; }
-    if (!$('login-pin').value) { $('login-error').textContent = 'Enter the door PIN.'; $('login-pin').focus(); return; }
-    $('login-btn').disabled = true;
+  function pressKey(k) {
+    if (unlocking || $('pin').hidden) return;
+    if (k === 'back') pinValue = pinValue.slice(0, -1);
+    else if (/^\d$/.test(k) && pinValue.length < 12) pinValue += k;
+    else return;
+    $('pin-error').textContent = '';
+    renderPinBoxes();
+    if (k !== 'back' && pinLengths.indexOf(pinValue.length) !== -1) tryUnlock();
+  }
+
+  async function tryUnlock() {
+    unlocking = true;
     try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-    } catch (e) { /* ignore */ }
+      var res = await api('POST', '/api/door/unlock', { pin: pinValue });
+      unlocked = res.events || [];
+      if (targetEvent && unlocked.some(function (e) { return e.id === targetEvent.id; })) setupEventId = targetEvent.id;
+      showSetup();
+    } catch (e) {
+      if (e.status === 401 && pinValue.length < maxPinLen()) return; // a longer PIN may still be on its way
+      wrongPin(e.status === 401 ? 'Wrong PIN' : e.status === 429 ? e.message : 'Could not reach the server. Check the connection.');
+    } finally {
+      unlocking = false;
+    }
+  }
+
+  function wrongPin(message) {
+    var boxes = $('pin-boxes');
+    boxes.classList.remove('shake');
+    void boxes.offsetWidth;
+    boxes.classList.add('shake');
+    if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+    $('pin-error').textContent = message;
+    setTimeout(function () { pinValue = ''; renderPinBoxes(); }, 380);
+  }
+
+  // ------------------------------------------------------------------ 02 event and door
+
+  function liveRank(e) {
+    var t = Date.parse(e.startsAt);
+    if (isNaN(t)) return 2;
+    var now = Date.now();
+    return now >= t - 12 * 3600e3 && now <= t + 10 * 3600e3 ? 0 : 1;
+  }
+
+  function eventCard(e, on, onclick) {
+    var stats = e.tickets !== undefined ? el('div', { class: 'st' }, [el('span', { text: Number(e.tickets).toLocaleString() + ' tickets' }), el('span', { class: 'm', text: e.platforms + (e.platforms === 1 ? ' platform' : ' platforms') })]) : null;
+    return el('button', { type: 'button', class: 'ev-card' + (on ? ' on' : ''), role: 'radio', 'aria-checked': on ? 'true' : 'false', 'data-id': e.id, onclick: onclick }, [
+      el('div', { class: 'nm', text: e.name }),
+      el('div', { class: 'wh', text: [e.venue, fmtWhen(e.startsAt)].filter(Boolean).join(' · ') || 'No date set' }),
+      stats,
+    ]);
+  }
+
+  function showSetup() {
+    ['pin', 'pick'].forEach(hide);
+    show('setup');
+    $('setup-error').textContent = '';
+    var list = unlocked.slice().sort(function (a, b) { return liveRank(a) - liveRank(b) || String(a.startsAt).localeCompare(String(b.startsAt)); });
+    if (!list.some(function (e) { return e.id === setupEventId; })) {
+      // Tonight is pre-picked. Two shows tonight on the same PIN: the person picks, so nobody scans the wrong list.
+      setupEventId = list.length === 1 || (list.length > 1 && liveRank(list[0]) < liveRank(list[1])) ? list[0].id : null;
+    }
+    $('setup-when').textContent = list.length > 1 ? (liveRank(list[0]) === 0 ? 'Tonight: pick one' : 'Pick one') : (list[0] && liveRank(list[0]) === 0 ? 'Tonight' : 'Next up');
+    var box = $('setup-events');
+    box.textContent = '';
+    list.forEach(function (e) { box.appendChild(eventCard(e, e.id === setupEventId, function () { setupEventId = e.id; showSetup(); })); });
+    $('pick-another').hidden = !doorEventsList.some(function (e) { return !list.some(function (u) { return u.id === e.id; }); });
+    if (DEVICE_NAMES.indexOf(deviceChoice) === -1) deviceChoice = DEVICE_NAMES[0];
+    var grid = $('door-grid');
+    grid.textContent = '';
+    DEVICE_NAMES.forEach(function (name) {
+      var on = name === deviceChoice;
+      grid.appendChild(el('button', { type: 'button', class: on ? 'on' : '', role: 'radio', 'aria-checked': on ? 'true' : 'false', text: name, onclick: function () { deviceChoice = name; showSetup(); } }));
+    });
+    $('start-btn').disabled = !setupEventId;
+  }
+
+  function showPick() {
+    hide('setup');
+    show('pick');
+    var list = $('pick-list');
+    list.textContent = '';
+    doorEventsList.forEach(function (e) {
+      var open = unlocked.filter(function (u) { return u.id === e.id; })[0];
+      list.appendChild(eventCard(open || e, e.id === setupEventId, function () {
+        if (open) { setupEventId = e.id; showSetup(); }
+        else showPin('', e);
+      }));
+    });
+  }
+
+  async function startFromSetup() {
+    $('setup-error').textContent = '';
+    if (!setupEventId) { $('setup-error').textContent = 'Pick the event first.'; return; }
+    $('start-btn').disabled = true;
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { /* ignore */ }
     try {
-      var deviceName = $('login-device').value.trim() || 'Door';
-      var res = await api('POST', '/api/door/login', { eventId: selectedEventId, pin: $('login-pin').value, deviceName: deviceName });
+      var res = await api('POST', '/api/door/login', { eventId: setupEventId, pin: pinValue, deviceName: deviceChoice });
       session = { token: res.token, event: res.event, device: res.device };
       save('door.session', session);
-      save('door.deviceName', deviceName);
-      $('login-pin').value = '';
-      renderPinBoxes();
+      save('door.deviceName', deviceChoice);
+      pinValue = '';
+      hide('setup');
       await startScanning();
     } catch (e) {
-      $('login-error').textContent = e.message || 'Could not sign in';
+      var ev = doorEventsList.filter(function (x) { return x.id === setupEventId; })[0];
+      if (e.status === 401 && ev) showPin('That PIN doesn’t open this event.', ev);
+      else $('setup-error').textContent = e.message || 'Could not sign in';
     } finally {
-      $('login-btn').disabled = false;
+      $('start-btn').disabled = false;
     }
   }
 
   async function startScanning() {
-    hide('login');
+    ['pin', 'setup', 'pick'].forEach(hide);
     show('scan');
-    $('event-name').textContent = eventLine(session.event);
-    $('device-name').textContent = session.device.name;
+    lastAdmit = null;
+    renderLastAdmit();
     $('menu-device').textContent = session.device.name;
     $('btn-logout').textContent = 'Sign out of ' + session.device.name;
     applyTestMode();
@@ -707,7 +787,7 @@
     stopEverything();
     session = null;
     save('door.session', null);
-    showLogin('This phone was signed out. Enter the PIN again.');
+    showPin('This phone was signed out. Enter the PIN again.');
   }
 
   function stopEverything() {
@@ -727,37 +807,42 @@
     if (name && window.indexedDB) indexedDB.deleteDatabase(name); // guest details don't stay on a shared phone
     session = null;
     save('door.session', null);
-    tickets.clear(); byKey.clear(); outbox.clear(); recent = [];
-    showLogin('');
+    tickets.clear(); byKey.clear(); outbox.clear(); recent = []; lastAdmit = null;
+    showPin('');
   }
 
   // ------------------------------------------------------------------ wire up
 
   function bind() {
-    $('login-form').addEventListener('submit', login);
-    ['input', 'focus', 'blur'].forEach(function (evt) { $('login-pin').addEventListener(evt, function () { $('login-pin').value = $('login-pin').value.replace(/\D/g, ''); renderPinBoxes(); }); });
-    $('login-device').addEventListener('input', renderDeviceChips);
+    // 01 PIN: on-screen keypad, or a keyboard
+    $('keypad').addEventListener('click', function (e) { var b = e.target.closest('button[data-key]'); if (b) pressKey(b.getAttribute('data-key')); });
+    document.addEventListener('keydown', function (e) {
+      if ($('pin').hidden || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (/^\d$/.test(e.key)) { e.preventDefault(); pressKey(e.key); }
+      else if (e.key === 'Backspace') { e.preventDefault(); pressKey('back'); }
+    });
+    // 02 event and door
+    $('start-btn').addEventListener('click', startFromSetup);
+    $('pick-another').addEventListener('click', showPick);
+    $('pick-close').addEventListener('click', showSetup);
 
     $('result').addEventListener('click', dismissResult);
-    $('r-search').addEventListener('click', function (e) { e.stopPropagation(); dismissResult(); $('btn-search').click(); });
+    $('r-done').addEventListener('click', function (e) { e.stopPropagation(); dismissResult(); });
+    $('r-search').addEventListener('click', function (e) { e.stopPropagation(); dismissResult(); openSearch(); });
+    $('last-undo').addEventListener('click', function () { if (lastAdmit) undo(lastAdmit.id); });
 
-    $('btn-search').addEventListener('click', function () { openPage('search'); $('search-input').value = ''; renderSearch(); setTimeout(function () { $('search-input').focus(); }, 50); });
+    $('btn-search').addEventListener('click', openSearch);
     $('search-input').addEventListener('input', renderSearch);
+    $('search-form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var raw = $('search-input').value.trim();
+      if (looksLikeCode(raw)) checkTypedCode(raw);
+    });
     $('search-clear').addEventListener('click', function () { $('search-input').value = ''; renderSearch(); $('search-input').focus(); });
     $('search-close').addEventListener('click', function () { closePages(); });
 
-    $('btn-manual').addEventListener('click', function () { openPage('manual'); $('manual-input').value = ''; renderManualRecent(); setTimeout(function () { $('manual-input').focus(); }, 50); });
-    $('manual-close').addEventListener('click', function () { closePages(); });
-    $('manual-form').addEventListener('submit', function (e) {
-      e.preventDefault();
-      var v = $('manual-input').value.trim();
-      if (!v) return;
-      closePages(true);
-      lastCode = '';
-      handleCode(v, 'manual');
-    });
-
     $('btn-menu').addEventListener('click', function () { renderRecent(); renderStatus(); openPage('menu'); });
+    function openSearch() { openPage('search'); $('search-input').value = ''; renderSearch(); setTimeout(function () { $('search-input').focus(); }, 50); }
     $('menu-close').addEventListener('click', function () { closePages(); });
     $('btn-camera').addEventListener('click', async function () {
       if (settings.nocamera || !scanner) return startCamera();
@@ -788,7 +873,7 @@
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1')) {
     navigator.serviceWorker.register('/sw.js').catch(function () { /* offline cache unavailable */ });
   }
-  if (session && session.token) startScanning(); else showLogin();
+  if (session && session.token) startScanning(); else showPin();
 
   // Exposed for automated tests only.
   window.__door = { handleCode: handleCode, state: function () { return { tickets: tickets.size, outbox: outbox.size, online: online, cursor: cursor, counts: counts() }; } };
