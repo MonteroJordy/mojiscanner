@@ -272,6 +272,18 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
     json(res, 200, { ok: true });
   });
 
+  // Rename a phone. Its scans from now on carry the new name; the phone picks it up on its next sync.
+  router.patch('/api/admin/devices/:id', async (req, res, p) => {
+    requireAdmin(req);
+    const body = await readJson(req);
+    const name = str(body.name, 40);
+    if (!name) throw new HttpError(400, 'Type a name for this phone');
+    const d = db.get('SELECT id FROM devices WHERE id = ? AND revoked = 0', p.id);
+    if (!d) throw new HttpError(404, 'That phone is signed out');
+    db.run('UPDATE devices SET name = ? WHERE id = ?', name, d.id);
+    json(res, 200, { device: { id: d.id, name } });
+  });
+
   // ---------- admin: sources ----------
 
   function cleanApiConfig(platform, input, existing = {}) {
@@ -601,7 +613,7 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
     const q = new URL(req.url, 'http://x').searchParams;
     const out = tickets.changesSince(db, d.event_id, Number(q.get('rev')) || 0, Number(q.get('id')) || 0, 2000);
     const st = tickets.stats(db, d.event_id);
-    json(res, 200, { ...out, stats: { valid: st.valid, scanned: st.scanned }, serverTime: nowIso() });
+    json(res, 200, { ...out, stats: { valid: st.valid, scanned: st.scanned }, device: { name: d.name }, serverTime: nowIso() });
   });
 
   function scanInput(d, body, offline) {
