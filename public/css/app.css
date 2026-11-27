@@ -212,6 +212,11 @@ body.door { overflow: hidden; height: 100%; }
 .door-grid button { height: auto; min-height: 54px; padding: 6px 12px; border-radius: var(--r); border: 1.5px solid var(--line); font-size: clamp(14.4px, 4.38vw, 18.9px); font-weight: 800; line-height: 1.15; white-space: normal; overflow-wrap: anywhere; }
 .door-grid.many button { min-height: 48px; font-size: clamp(13.6px, 4vw, 17px); }
 .door-grid button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+/* The phone's own name, under the door names: dashed until it has text, then it reads as the pick. 16px minimum so iPhones don't zoom in. */
+.own-name { width: 100%; min-height: 54px; margin-top: 10px; padding: 0 16px; border-radius: var(--r); border: 1.5px dashed var(--line); background: transparent; color: var(--text); font: inherit; font-size: clamp(16px, 4.38vw, 18.9px); font-weight: 800; text-align: center; }
+.own-name::placeholder { color: var(--muted); font-weight: 700; opacity: 1; }
+.own-name:focus { outline: none; border-style: solid; border-color: var(--text); }
+.own-name.on { border-style: solid; border-color: var(--text); background: var(--text); color: var(--bg); caret-color: var(--bg); }
 .pick-col { padding-top: 20px; }
 
 /* 03 scan */
@@ -488,7 +493,7 @@ body.door { overflow: hidden; height: 100%; }
   .setup-a, .setup-b { display: flex; flex-direction: column; min-width: 0; }
   .setup-a .link-row { margin-bottom: 0; }
   .setup-b .grow-space { min-height: 14px; }
-  .door-grid button { min-height: 48px; }
+  .door-grid button, .own-name { min-height: 48px; }
   /* 03 scan: the camera fills the left, counts and buttons stack on the right */
   .scan-ui { max-width: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(250px, 300px); grid-template-rows: auto auto 1fr auto auto; column-gap: 16px; padding: calc(10px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) calc(12px + env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
   .scan-center { grid-column: 1; grid-row: 1 / -1; gap: 12px; }
@@ -1185,6 +1190,9 @@ tr.flash .state .dot { animation: pop .45s var(--ease-spring) both; }
   table.data.preview td.pv-ticketType.blank + td.pv-quantity { grid-area: a; }
   table.data.devices thead { display: none; }
 }
+
+/* Door phones: Rename and Sign out side by side, wrapping when the row is narrow. */
+.row-actions { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 
 /* The smallest phones: logo, Events, Status and Sign out still fit on one line. */
 @media (max-width: 360px) {
