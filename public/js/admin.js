@@ -1785,7 +1785,7 @@
       el('button', { type: 'button', class: 'sm', text: 'Edit names', onclick: function () { editDoorNames(ev); } }),
     ]));
     box.appendChild(el('div', { class: 'door-names' }, doorNames(ev).map(function (nm) { return el('span', { class: 'name-chip', text: nm }); })));
-    box.appendChild(el('p', { class: 'muted door-names-note', text: 'Each phone picks one of these when it signs in. Scans show which door let someone in.' }));
+    box.appendChild(el('p', { class: 'muted door-names-note', text: 'Each phone picks one of these or types its own name when it signs in. Rename a phone any time under Door phones.' }));
 
     var phones = data.devices || [];
     var signedIn = phones.filter(function (d) { return !d.revoked; });
@@ -1812,12 +1812,15 @@
             ]),
             el('td', { class: 'hide-sm', text: fmtStamp(d.createdAt) }),
             el('td', { class: 'hide-sm', text: seen(d) }),
-            el('td', { class: 'r' }, [d.revoked ? null : el('button', { type: 'button', class: 'xs danger', text: 'Sign out', 'aria-label': 'Sign out ' + d.name, onclick: async function () {
-              if (!(await ask('Sign out ' + d.name + '?', 'That phone goes back to the PIN screen. Staff type the PIN to get back in, and scans saved on it upload then.', 'Sign out', true))) return;
-              await api('POST', '/api/admin/devices/' + d.id + '/revoke', {});
-              toast(d.name + ' signed out', 0, 'ok');
-              refreshEvent(true);
-            } })]),
+            el('td', { class: 'r' }, d.revoked ? [] : [el('div', { class: 'row-actions' }, [
+              el('button', { type: 'button', class: 'xs', text: 'Rename', 'aria-label': 'Rename ' + d.name, onclick: function () { renamePhone(d); } }),
+              el('button', { type: 'button', class: 'xs danger', text: 'Sign out', 'aria-label': 'Sign out ' + d.name, onclick: async function () {
+                if (!(await ask('Sign out ' + d.name + '?', 'That phone goes back to the PIN screen. Staff type the PIN to get back in, and scans saved on it upload then.', 'Sign out', true))) return;
+                await api('POST', '/api/admin/devices/' + d.id + '/revoke', {});
+                toast(d.name + ' signed out', 0, 'ok');
+                refreshEvent(true);
+              } }),
+            ])]),
           ]);
         })),
       ])]));
@@ -1870,12 +1873,32 @@
         refreshEvent(true);
       } catch (ex) { err.textContent = ex.message; busy(save, false); }
     } }, [
-      el('p', { class: 'muted names-intro', text: 'Phones pick one of these when they sign in. Phones already scanning keep the name they picked.' }),
+      el('p', { class: 'muted names-intro', text: 'Phones pick one of these when they sign in, or type their own. Phones already scanning keep their name; rename them under Door phones.' }),
       list,
       el('div', { class: 'names-tools' }, [add, reset]),
       el('div', { class: 'head-actions' }, [save]),
       err,
     ]), null, { small: true });
+  }
+
+  // A phone's name shows on every scan it makes from now on. The phone itself picks it up within seconds.
+  function renamePhone(d) {
+    var input = el('input', { value: d.name, maxlength: 40, required: true, autocomplete: 'off', autocapitalize: 'words', 'aria-label': 'Phone name' });
+    var err = el('p', { class: 'error', role: 'alert' });
+    var save = el('button', { class: 'primary lg', type: 'submit', text: 'Save name' });
+    var close = modal('Rename ' + d.name, el('form', { class: 'pin-form', onsubmit: async function (e) {
+      e.preventDefault();
+      err.textContent = '';
+      if (!input.value.trim()) { err.textContent = 'Type a name for this phone.'; return; }
+      busy(save, true);
+      try {
+        var r = await api('PATCH', '/api/admin/devices/' + d.id, { name: input.value });
+        close();
+        toast('Renamed to ' + r.device.name, 0, 'ok');
+        refreshEvent(true);
+      } catch (ex) { err.textContent = ex.message; busy(save, false); }
+    } }, [field('Phone name', input, 'A person or a door: Carlos, Main door, VIP. Scans from now on show this name.'), el('div', { class: 'head-actions' }, [save]), err]), null, { small: true });
+    later(260, function () { input.focus(); input.select(); });
   }
 
   function changePin(ev) {
@@ -1908,7 +1931,7 @@
     var when = [day, fmtDoors(ev.startsAt), ev.venue].filter(Boolean).join(' · ');
     return ['Door scanner for ' + ev.name]
       .concat(when ? [when] : [])
-      .concat(['', '1. Open ' + doorLink(ev), '2. Type the door PIN' + (ev.doorPin ? ': ' + ev.doorPin : ''), '3. Pick your door and tap Start scanning'])
+      .concat(['', '1. Open ' + doorLink(ev), '2. Type the door PIN' + (ev.doorPin ? ': ' + ev.doorPin : ''), '3. Pick your door or type your name, then tap Start scanning'])
       .join('\n');
   }
 

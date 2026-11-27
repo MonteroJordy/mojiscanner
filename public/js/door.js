@@ -299,6 +299,12 @@
   async function pullChanges() {
     for (var page = 0; page < 100; page++) {
       var res = await api('GET', '/api/door/tickets?rev=' + cursor.rev + '&id=' + cursor.id, null, 20000);
+      // Renamed in the admin: this phone takes the new name for its menu and its offline check-ins.
+      if (res.device && res.device.name && session && session.device && res.device.name !== session.device.name) {
+        session.device.name = res.device.name;
+        save('door.session', session);
+        paintDeviceName();
+      }
       if (res.tickets.length) {
         res.tickets.forEach(indexTicket);
         await idbPutMany('tickets', res.tickets).catch(function () {});
@@ -828,16 +834,35 @@
     $('pick-another').hidden = !doorEventsList.some(function (e) { return !list.some(function (u) { return u.id === e.id; }); });
     // The promoter's door names for the picked event (or the first one listed), else the standard four.
     var named = list.filter(function (e) { return e.id === setupEventId; })[0] || list[0];
-    var names = named && named.doorNames && named.doorNames.length ? named.doorNames : DEVICE_NAMES;
-    if (names.indexOf(deviceChoice) === -1) deviceChoice = names[0];
+    setupNames = named && named.doorNames && named.doorNames.length ? named.doorNames : DEVICE_NAMES;
+    // Arriving from the PIN screen starts with an empty name box; coming back from Pick another keeps it.
+    if (dir === 'fwd') ownName = '';
+    renderDoorGrid();
+    $('start-btn').disabled = !setupEventId;
+  }
+
+  // The door names to tap, plus a box for the phone's own name (a person or a door). Typing wins over the taps.
+  var setupNames = DEVICE_NAMES;
+  var ownName = '';
+  var pickedName = deviceChoice; // the door name last tapped; back in charge when the box is cleared
+  function renderDoorGrid() {
+    var typed = ownName.trim();
+    if (setupNames.indexOf(pickedName) === -1) pickedName = setupNames[0];
+    deviceChoice = typed || pickedName;
     var grid = $('door-grid');
     grid.textContent = '';
-    grid.classList.toggle('many', names.length > 4);
-    names.forEach(function (name) {
-      var on = name === deviceChoice;
-      grid.appendChild(el('button', { type: 'button', class: on ? 'on' : '', role: 'radio', 'aria-checked': on ? 'true' : 'false', text: name, onclick: function () { deviceChoice = name; showSetup(); } }));
+    grid.classList.toggle('many', setupNames.length > 4);
+    setupNames.forEach(function (name) {
+      var on = !typed && name === pickedName;
+      grid.appendChild(el('button', { type: 'button', class: on ? 'on' : '', role: 'radio', 'aria-checked': on ? 'true' : 'false', text: name, onclick: function () {
+        ownName = '';
+        pickedName = name;
+        renderDoorGrid();
+      } }));
     });
-    $('start-btn').disabled = !setupEventId;
+    var own = $('own-name');
+    if (own.value !== ownName) own.value = ownName;
+    own.classList.toggle('on', !!typed);
   }
 
   function showPick() {
@@ -878,15 +903,19 @@
     }
   }
 
+  function paintDeviceName() {
+    $('menu-device').textContent = session.device.name;
+    $('btn-logout').textContent = 'Sign out of ' + session.device.name;
+  }
+
   async function startScanning() {
     ['pin', 'setup', 'pick'].forEach(hide);
     show('scan', 'open');
     lastAdmit = null;
     renderLastAdmit();
-    $('menu-device').textContent = session.device.name;
+    paintDeviceName();
     $('menu-event').textContent = session.event ? session.event.name : '';
     $('menu-event-sub').textContent = session.event ? [session.event.venue, fmtWhen(session.event.startsAt)].filter(Boolean).join(' · ') : '';
-    $('btn-logout').textContent = 'Sign out of ' + session.device.name;
     applyTestMode();
     tickets.clear(); byKey.clear(); outbox.clear();
     cursor = { rev: 0, id: 0 };
@@ -972,6 +1001,8 @@
     });
     // 02 event and door
     $('start-btn').addEventListener('click', startFromSetup);
+    $('own-name').addEventListener('input', function (e) { ownName = e.target.value; renderDoorGrid(); });
+    $('own-name').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } });
     $('pick-another').addEventListener('click', function () { showPick(); });
     $('pick-close').addEventListener('click', function () { showSetup('back'); });
 
