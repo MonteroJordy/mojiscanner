@@ -144,16 +144,34 @@
     }, ms || 4000);
   }
 
+  // Only the top pop-up takes clicks and Tab: the page and any pop-up under it are inert until it closes.
+  function syncInert() {
+    var open = [].slice.call(document.querySelectorAll('.modal-back:not(.leaving)'));
+    root.inert = open.length > 0;
+    open.forEach(function (b, i) { b.inert = i < open.length - 1; });
+  }
+
+  // Every open pop-up's close(), so leaving the page (Back, sign-in expired) never strands one on screen.
+  var openModals = [];
+  function closeAllModals() { openModals.slice().reverse().forEach(function (c) { c(); }); }
+
   // opts: { small, noClose, alert }. Pop-ups can stack (a confirm over the Edit sheet): Escape closes the top one.
   function modal(title, body, onClose, opts) {
     opts = opts || {};
     var back = el('div', { class: 'modal-back' });
+    var opener = document.activeElement; // focus goes back here on close
     var closed = false;
     function close() {
       if (closed) return;
       closed = true;
+      openModals = openModals.filter(function (c) { return c !== close; });
       back.classList.add('leaving'); // slides away, then leaves the page
+      back.inert = true;
       document.removeEventListener('keydown', esc);
+      syncInert();
+      if (opener && opener !== document.body && opener.isConnected && !opener.closest('[inert]') && !/^(INPUT|TEXTAREA|SELECT)$/.test(opener.tagName)) {
+        try { opener.focus({ preventScroll: true }); } catch (_) { /* gone */ }
+      }
       later(200, function () {
         back.remove();
         document.body.classList.toggle('modal-open', !!document.querySelector('.modal-back:not(.leaving)'));
@@ -170,6 +188,10 @@
     document.addEventListener('keydown', esc);
     document.body.appendChild(back);
     document.body.classList.add('modal-open');
+    openModals.push(close);
+    syncInert();
+    box.tabIndex = -1; // Tab starts inside the pop-up, not on the page behind it
+    try { box.focus({ preventScroll: true }); } catch (_) { /* old browser */ }
     return close;
   }
 
@@ -257,6 +279,7 @@
   function pageChangeFresh() { return freshPage; }
   var EVENT_TAB = /^#\/event\/([^/]+)(?:\/(guests|scans|door))?$/;
   function route() {
+    closeAllModals();
     var h = location.hash;
     var m = EVENT_TAB.exec(h);
     // Another tab of the event on screen: switch in place, no reload.
@@ -276,6 +299,7 @@
   // ------------------------------------------------------------------ login
 
   function renderLogin() {
+    closeAllModals();
     clearInterval(refreshTimer);
     root.textContent = '';
     var pw = el('input', { type: 'password', autocomplete: 'current-password', required: true });
@@ -370,7 +394,7 @@
       ]));
     });
     var listBox = el('div', { class: 'ev-list' }, [
-      el('div', { class: 'ev-row ev-head', 'aria-hidden': 'true' }, ['Event', 'Date', 'Status', 'Checked in', 'Sold on'].map(function (h) { return el('span', { class: 'label xs', text: h }); })),
+      el('div', { class: 'ev-row ev-head', 'aria-hidden': 'true' }, [['ev-name', 'Event'], ['ev-when', 'Date'], ['ev-status', 'Status'], ['ev-in', 'Checked in'], ['ev-src', 'Sold on']].map(function (h) { return el('span', { class: 'label xs ' + h[0], text: h[1] }); })),
     ].concat(rows));
     main.appendChild(listBox);
     if (pageChangeFresh()) stagger(listBox.querySelectorAll('.ev-row:not(.ev-head), .ev-group'));
@@ -671,7 +695,7 @@
     if (s.kind === 'api') return el('button', { type: 'button', class: 'sm', text: 'Sync now', onclick: function (e) { runSync(s, {}, e.currentTarget); } });
     if (s.kind === 'webhook') return el('button', { type: 'button', class: 'sm', text: 'Setup', 'aria-label': 'Webhook setup', onclick: function () { webhookSetup(ev, s); } });
     var due = !s.lastSyncAt || isStale(s);
-    return el('a', { class: 'btn sm' + (due ? ' primary' : ''), href: '#/event/' + ev.id + '/upload/' + s.id, text: s.lastSyncAt ? 'Upload new file' : 'Upload file' });
+    return el('a', { class: 'btn sm' + (due ? ' primary' : ''), href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file' });
   }
 
   function pctOf(c) { return c && c.valid ? Math.min(100, Math.round(100 * c.scanned / c.valid)) : 0; }
@@ -690,12 +714,10 @@
     var state = sourceState(s);
     var failed = s.kind === 'api' && s.lastSyncOk === false;
     var open = el('button', { type: 'button', class: 'src-open', 'aria-label': 'Manage ' + s.platformName + (label ? ', ' + label : ''), onclick: function () { sourceSheet(ev, s, counts); } }, [
+      // Platform and name on one line, state under it: every row starts its text at the same edge.
       el('span', { class: 'src-id' }, [
-        el('span', { class: 'badge', text: s.platformName }),
-        el('span', { class: 'src-name' }, [
-          el('strong', { text: label || HOW[s.kind] }),
-          el('span', { class: 'src-state' }, [el('span', { class: 'dot ' + state[0] }), el('span', { text: (label ? HOW_SHORT[s.kind] + ' · ' : '') + state[1] })]),
-        ]),
+        el('span', { class: 'src-title' }, [el('span', { class: 'badge', text: s.platformName }), el('strong', { text: label || HOW[s.kind] })]),
+        el('span', { class: 'src-state' }, [el('span', { class: 'dot ' + state[0] }), el('span', { text: (label ? HOW_SHORT[s.kind] + ' · ' : '') + state[1] })]),
       ]),
       srcNums(counts, null, view && view.prevSrc ? view.prevSrc[s.id] : 0), // a refresh doesn't restart the bar
       el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }),
@@ -723,7 +745,7 @@
       acts.appendChild(el('button', { type: 'button', class: 'lg', text: 'Settings', onclick: then(function () { editApiSource(ev, s); }) }));
       if (s.platform === 'shotgun') acts.appendChild(el('button', { type: 'button', class: 'lg', text: 'Full re-sync', onclick: async function (e) { await runSync(s, { full: true }, e.currentTarget); close(); } }));
     } else if (s.kind === 'file') {
-      acts.appendChild(el('a', { class: 'btn primary lg', href: '#/event/' + ev.id + '/upload/' + s.id, text: s.lastSyncAt ? 'Upload new file' : 'Upload file', onclick: close }));
+      acts.appendChild(el('a', { class: 'btn primary lg', href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file', onclick: close }));
     } else {
       acts.appendChild(el('button', { type: 'button', class: 'primary lg', text: 'Webhook setup', onclick: then(function () { webhookSetup(ev, s); }) }));
       acts.appendChild(el('a', { class: 'btn lg', href: '#/event/' + ev.id + '/upload/' + s.id, text: 'Upload file', onclick: close }));
@@ -1202,14 +1224,18 @@
     function drawSeg() {
       seg.textContent = '';
       segs.forEach(function (sg) { seg.appendChild(el('button', { type: 'button', class: status === sg[0] ? 'on' : '', 'aria-pressed': status === sg[0] ? 'true' : 'false', text: sg[1] + ' ' + n(sg[2]), onclick: function () { status = sg[0]; drawSeg(); load(true); } })); });
-      // On a phone the chips scroll sideways: keep the chosen one in view.
+      chipInView(0);
+    }
+    // On a phone the chips scroll sideways: keep the chosen one in view (also when the tab opens on Flagged).
+    function chipInView(tries) {
       var on = seg.querySelector('button.on');
-      if (on && seg.scrollWidth > seg.clientWidth) {
-        var a = seg.getBoundingClientRect();
-        var b = on.getBoundingClientRect();
-        if (b.right > a.right - 8) seg.scrollLeft += b.right - a.right + 24;
-        else if (b.left < a.left + 8) seg.scrollLeft -= a.left - b.left + 24;
-      }
+      if (!on) return;
+      if (!seg.isConnected || !seg.clientWidth) { if (tries < 20) requestAnimationFrame(function () { chipInView(tries + 1); }); return; }
+      if (seg.scrollWidth <= seg.clientWidth) return;
+      var a = seg.getBoundingClientRect();
+      var b = on.getBoundingClientRect();
+      if (b.right > a.right - 8) seg.scrollLeft += b.right - a.right + 24;
+      else if (b.left < a.left + 8) seg.scrollLeft -= a.left - b.left + 24;
     }
     var list = el('div', { class: 'table-wrap' });
     var timer;
@@ -1249,14 +1275,14 @@
           el('td', { class: 'guest' }, [el('strong', { text: t.holderName || '(no name)' }), isMadeUp(t.code) ? el('span', { class: 'tag noqr', title: 'This list had no QR codes: check this guest in by name', text: 'no QR' }) : null, el('span', { class: 'sub show-sm', text: [t.ticketType, platformName(t.platform)].filter(Boolean).join(' · ') })]),
           el('td', { class: 'hide-sm', text: t.ticketType || '' }),
           el('td', { class: 'hide-sm' }, [el('span', { class: 'badge sm', text: platformName(t.platform) })]),
-          el('td', { class: 'email hide-sm', text: t.holderEmail || '' }),
+          el('td', { class: 'email hide-sm hide-md', text: t.holderEmail || '' }),
           el('td', { class: 'st' }, [statusCell, t.flag ? el('span', { class: 'tag flag', text: t.flag.replace(/_/g, ' ') }) : null]),
           el('td', { class: 'r act' }, [action]),
         ]);
       }));
       changed = null;
       list.appendChild(el('table', { class: 'data tickets' }, [
-        el('thead', null, [el('tr', null, [['Guest'], ['Ticket type', 'hide-sm'], ['Platform', 'hide-sm'], ['Email', 'hide-sm'], ['Status'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
+        el('thead', null, [el('tr', null, [['Guest'], ['Ticket type', 'hide-sm'], ['Platform', 'hide-sm'], ['Email', 'hide-sm hide-md'], ['Status'], ['']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
         tbody,
       ]));
       if (animate) stagger(tbody.children);
@@ -1287,11 +1313,11 @@
         el('td', { class: 'res' }, [el('span', { class: 'tag ' + l[0], text: l[1] }), s.note ? el('span', { class: 'sub', text: s.note.replace(/_/g, ' ') }) : null]),
         el('td', { class: 'who' }, [s.holder_name ? el('strong', { text: s.holder_name }) : (s.code_raw ? el('span', { class: 'mono', text: String(s.code_raw).slice(0, 40) }) : ''), el('span', { class: 'sub', text: [s.ticket_type, s.platform ? platformName(s.platform) : ''].filter(Boolean).join(' · ') })]),
         el('td', { class: 'door', text: s.device_name || '' }),
-        el('td', { class: 'muted hide-sm', text: ({ camera: 'Camera', manual: 'Typed', search: 'Search', scanner: 'Handheld scanner' }[s.method] || s.method) + (s.offline ? ' · offline' : '') }),
+        el('td', { class: 'muted hide-sm hide-md', text: ({ camera: 'Camera', manual: 'Typed', search: 'Search', scanner: 'Handheld scanner' }[s.method] || s.method) + (s.offline ? ' · offline' : '') }),
       ]);
     }));
     box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data scans' }, [
-      el('thead', null, [el('tr', null, [['Time'], ['Result'], ['Guest'], ['Door'], ['How', 'hide-sm']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
+      el('thead', null, [el('tr', null, [['Time'], ['Result'], ['Guest'], ['Door'], ['How', 'hide-sm hide-md']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
       tbody,
     ])]));
     if (opts && opts.fresh) stagger(tbody.children);

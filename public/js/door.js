@@ -421,7 +421,7 @@
     var text = $('last-admit-text');
     text.textContent = '';
     text.appendChild(el('span', { class: 'la-name', text: lastAdmit.name }));
-    text.appendChild(el('span', { class: 'la-meta', text: 'admitted ' + fmtShort(lastAdmit.at) }));
+    text.appendChild(el('span', { class: 'la-meta', text: 'Admitted ' + fmtShort(lastAdmit.at) }));
     box.hidden = false;
   }
 
@@ -595,9 +595,12 @@
     recent.slice(0, 25).forEach(function (r, i) {
       var row = r.row;
       var canUndo = r.result === 'admitted' && row && !r.undone;
+      // Name first with the time under it, so names get the width on small phones.
       var item = el('div', { class: 'item' }, [
-        el('span', { class: 'time', text: fmtShort(r.at) }),
-        el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
+        el('span', { class: 'who' }, [
+          el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
+          el('span', { class: 'time', text: fmtShort(r.at) }),
+        ]),
         r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
         canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : el('span', { class: 'undo-space' }),
       ]);
