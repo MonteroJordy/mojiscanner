@@ -36,6 +36,22 @@ function summarize(stats) {
   return parts.length ? ` (${parts.join(', ')})` : ' (no changes)';
 }
 
+// Platforms sometimes echo what they were sent back in an error (DICE repeats a bad event ID, which can be a
+// pasted token). Mask anything token-shaped before it is stored or shown.
+function maskSecrets(text) {
+  return String(text || '').replace(/[A-Za-z0-9_\-]{24,}/g, (m) => `[hidden ••••${m.slice(-4)}]`);
+}
+
+// One plain sentence that says what went wrong and what to do, ahead of the technical detail.
+function plainLead(platform, err) {
+  const name = (PLATFORMS[platform] || {}).name || platform;
+  const msg = String(err && err.message || '');
+  if (err && (err.status === 401 || err.status === 403)) return `${name} rejected the token. Paste a fresh one in Settings.`;
+  if (platform === 'dice' && /could not decode id|eventId/i.test(msg)) return 'DICE didn\'t recognize the event ID. Open Settings and pick the event with Load my DICE events.';
+  if (/network error/i.test(msg)) return `Couldn't reach ${name}. It tries again automatically.`;
+  return '';
+}
+
 function isLive(startsAt, now) {
   if (!startsAt) return true;
   const t = Date.parse(startsAt);
@@ -79,7 +95,9 @@ function createSyncer({ db, crypto, config, fetchImpl = globalThis.fetch, log = 
         startedAt, message.slice(0, 1000), out.cursor !== undefined ? out.cursor : source.cursor, sourceId);
       return { ok: true, message, stats };
     } catch (err) {
-      const message = `${err.message}${err.hint ? ` — ${err.hint}` : ''}`;
+      const lead = plainLead(source.platform, err);
+      const detail = maskSecrets(`${err.message}${err.hint ? ` — ${err.hint}` : ''}`);
+      const message = lead ? `${lead}\n${detail}` : detail;
       db.run('UPDATE sources SET last_sync_at = ?, last_sync_ok = 0, last_sync_message = ? WHERE id = ?', startedAt, message.slice(0, 1000), sourceId);
       if (log && log.warn) log.warn(`[sync] ${source.platform} ${sourceId}: ${message}`);
       return { ok: false, message };
@@ -181,4 +199,4 @@ function createSyncer({ db, crypto, config, fetchImpl = globalThis.fetch, log = 
   return { runSource, tick, start, stop, receiveWebhook, reprocessWebhooks, recheck, isRunning: (id) => running.has(id) };
 }
 
-module.exports = { createSyncer, PLATFORMS, summarize, isLive };
+module.exports = { createSyncer, PLATFORMS, summarize, isLive, maskSecrets, plainLead };

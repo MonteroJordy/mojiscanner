@@ -495,7 +495,12 @@ function createApp({ config, db, crypto, fetchImpl = globalThis.fetch, log = con
   // ---------- door app ----------
 
   router.get('/api/door/events', async (req, res) => {
-    const rows = db.all("SELECT id, name, venue, starts_at FROM events WHERE archived = 0 AND door_pin_hash IS NOT NULL ORDER BY COALESCE(starts_at, created_at) DESC LIMIT 50");
+    // Door staff only need tonight's and upcoming events: hide ones that started more than 16 hours ago.
+    const cutoff = new Date(Date.now() - 16 * 3600e3).toISOString();
+    const rows = db.all(
+      `SELECT id, name, venue, starts_at FROM events
+        WHERE archived = 0 AND door_pin_hash IS NOT NULL AND (starts_at IS NULL OR starts_at >= ?)
+        ORDER BY starts_at IS NULL, starts_at ASC LIMIT 50`, cutoff);
     json(res, 200, { events: rows.map((r) => ({ id: r.id, name: r.name, venue: r.venue || null, startsAt: r.starts_at })) });
   });
 
