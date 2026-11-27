@@ -81,12 +81,24 @@
     return n;
   }
   // Screens slide in; re-adding the class restarts the animation.
+  var reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   function animateIn(node) { node.classList.remove('enter'); void node.offsetWidth; node.classList.add('enter'); }
-  function show(id) { var n = $(id); var was = n.hidden; n.hidden = false; if (was) animateIn(n); }
+  function play(node, cls) { node.classList.remove(cls); void node.offsetWidth; node.classList.add(cls); }
+  // show() also cancels a page that's on its way out, so a quick reopen never ends up hidden.
+  function show(id) { var n = $(id); clearTimeout(n._leave); var was = n.hidden || n.classList.contains('leaving'); n.classList.remove('leaving'); n.hidden = false; if (was) animateIn(n); }
+  // Animated exit, then hidden.
+  function leave(id, ms) {
+    var n = $(id);
+    if (n.hidden || n.classList.contains('leaving')) return;
+    n.classList.add('leaving');
+    clearTimeout(n._leave);
+    n._leave = setTimeout(function () { n.hidden = true; n.classList.remove('leaving'); }, reduceMotion ? 0 : ms || 220);
+  }
+  function gone(id) { var n = $(id); return n.hidden || n.classList.contains('leaving'); }
   // The phone's status bar takes the result's color, like the rest of the screen.
   var THEME = { admitted: '#2BD46A', duplicate: '#D42A24', void: '#6B1014', not_found: '#FF8A1F' };
   function setTheme(color) { var m = document.querySelector('meta[name="theme-color"]'); if (m) m.setAttribute('content', color || '#0d0b0c'); }
-  function hide(id) { $(id).hidden = true; }
+  function hide(id) { var n = $(id); clearTimeout(n._leave); n.classList.remove('leaving'); n.hidden = true; }
   function isMadeUp(t) { return !!(t && t.k && t.k.indexOf('NOQR-') === 0); }
   function eventLine(ev) { return [ev.name, ev.venue].filter(Boolean).join(' · '); }
 
@@ -198,7 +210,11 @@
     setTimeout(function () {
       countsQueued = false;
       var c = counts();
-      $('count-in').textContent = c.scanned.toLocaleString();
+      var node = $('count-in');
+      var before = Number(node.getAttribute('data-v') || 0);
+      node.setAttribute('data-v', String(c.scanned));
+      node.textContent = c.scanned.toLocaleString();
+      if (c.scanned > before && before > 0 && !reduceMotion) play(node, 'tick');
       $('count-total').textContent = c.valid.toLocaleString();
       $('search-counts').textContent = c.scanned.toLocaleString() + ' / ' + c.valid.toLocaleString();
     }, 150);
@@ -279,7 +295,7 @@
 
   async function handleCode(raw, method, ticketId) {
     if (!session || handling) return;
-    if (!$('result').hidden) {
+    if (!gone('result')) {
       // ADMIT moves on with the next QR; problems stay until Done, a tap or the timer.
       // A handheld scanner or a deliberate action always moves on.
       if (method === 'camera' && (!$('result').classList.contains('admitted') || raw === lastCode)) return;
@@ -380,6 +396,8 @@
     $('r-actions').hidden = res === 'admitted';
     $('r-search').hidden = !(res === 'not_found' && !out.rechecking);
 
+    clearTimeout(box._leave);
+    box.classList.remove('leaving');
     box.hidden = false;
     animateIn(box);
     setTheme(THEME[res]);
@@ -400,13 +418,16 @@
   function renderLastAdmit() {
     var box = $('last-admit');
     if (!lastAdmit || settings.test) { box.hidden = true; return; }
-    $('last-admit-text').textContent = lastAdmit.name + ' admitted · ' + fmtShort(lastAdmit.at);
+    var text = $('last-admit-text');
+    text.textContent = '';
+    text.appendChild(el('span', { class: 'la-name', text: lastAdmit.name }));
+    text.appendChild(el('span', { class: 'la-meta', text: 'admitted ' + fmtShort(lastAdmit.at) }));
     box.hidden = false;
   }
 
   function dismissResult() {
     clearTimeout(resultTimer);
-    $('result').hidden = true;
+    leave('result', 160);
     setTheme();
     if (scanner && pagesClosed()) scanner.resume();
   }
@@ -437,17 +458,17 @@
     }
     var tag = TAGS[local.result];
     kv('Door would show', el('span', { class: 'v' }, [el('span', { class: 'tag ' + tag[0], text: tag[1] })]));
-    $('test-sheet').hidden = false;
+    show('test-sheet');
     $('scan').classList.add('testing');
     feedback(local.result === 'admitted' ? 'admitted' : 'other');
   }
 
   function closeTest() {
     testShowing = false;
-    $('test-sheet').hidden = true;
-    $('scan').classList.remove('testing');
+    if (!$('test-sheet').hidden) leave('test-sheet', 200);
+    setTimeout(function () { if (!testShowing) $('scan').classList.remove('testing'); }, reduceMotion ? 0 : 200);
     lastCode = '';
-    if (scanner && pagesClosed() && $('result').hidden) scanner.resume();
+    if (scanner && pagesClosed() && gone('result')) scanner.resume();
   }
 
   // ------------------------------------------------------------------ feedback
@@ -494,9 +515,14 @@
     var t = document.querySelector('.toast');
     if (!t) { t = el('div', { class: 'toast' }); document.body.appendChild(t); }
     t.textContent = msg;
+    t.classList.remove('leaving');
     t.hidden = false;
+    play(t, 'enter');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.hidden = true; }, 3500);
+    toastTimer = setTimeout(function () {
+      t.classList.add('leaving');
+      toastTimer = setTimeout(function () { t.hidden = true; t.classList.remove('leaving'); }, reduceMotion ? 0 : 200);
+    }, 3500);
   }
 
   // ------------------------------------------------------------------ search / type code / more
@@ -565,19 +591,22 @@
     var list = $('recent');
     list.textContent = '';
     $('recent-empty').hidden = recent.length > 0;
-    recent.slice(0, 25).forEach(function (r) {
+    list.classList.toggle('d-rows-in', !reduceMotion && $('menu').hidden);
+    recent.slice(0, 25).forEach(function (r, i) {
       var row = r.row;
       var canUndo = r.result === 'admitted' && row && !r.undone;
-      list.appendChild(el('div', { class: 'item' }, [
+      var item = el('div', { class: 'item' }, [
         el('span', { class: 'time', text: fmtShort(r.at) }),
         el('span', { class: 'nm', text: row ? (row.n || 'Ticket holder') : String(r.raw || '').slice(0, 40) }),
         r.undone ? el('span', { class: 'tag muted', text: 'Undone' }) : resultTag(r.result),
         canUndo ? el('button', { type: 'button', class: 'undo', text: 'Undo', onclick: function () { undo(row.id); } }) : el('span', { class: 'undo-space' }),
-      ]));
+      ]);
+      item.style.setProperty('--i', String(Math.min(i, 12)));
+      list.appendChild(item);
     });
   }
 
-  function pagesClosed() { return $('search').hidden && $('menu').hidden; }
+  function pagesClosed() { return gone('search') && gone('menu'); }
 
   function openPage(id) {
     closePages(true);
@@ -585,8 +614,8 @@
     show(id);
   }
   function closePages(keepPaused) {
-    ['search', 'menu'].forEach(hide);
-    if (!keepPaused && scanner && $('result').hidden && !testShowing) scanner.resume();
+    ['search', 'menu'].forEach(function (id) { leave(id); });
+    if (!keepPaused && scanner && gone('result') && !testShowing) scanner.resume();
   }
 
   // ------------------------------------------------------------------ camera
@@ -834,11 +863,11 @@
       $('ask-title').textContent = title;
       $('ask-text').textContent = text;
       $('ask-yes').textContent = yes;
-      function answer(v) { box.hidden = true; $('ask-yes').onclick = $('ask-no').onclick = box.onclick = null; resolve(v); }
+      function answer(v) { leave('ask', 200); $('ask-yes').onclick = $('ask-no').onclick = box.onclick = null; resolve(v); }
       $('ask-yes').onclick = function (e) { e.stopPropagation(); answer(true); };
       $('ask-no').onclick = function (e) { e.stopPropagation(); answer(false); };
       box.onclick = function (e) { if (e.target === box) answer(false); };
-      box.hidden = false;
+      show('ask');
       $('ask-no').focus();
     });
   }
