@@ -85,7 +85,39 @@
   function animateIn(node) { node.classList.remove('enter'); void node.offsetWidth; node.classList.add('enter'); }
   function play(node, cls) { node.classList.remove(cls); void node.offsetWidth; node.classList.add(cls); }
   // show() also cancels a page that's on its way out, so a quick reopen never ends up hidden.
-  function show(id) { var n = $(id); clearTimeout(n._leave); var was = n.hidden || n.classList.contains('leaving'); n.classList.remove('leaving'); n.hidden = false; if (was) animateIn(n); }
+  // dir: 'fwd' (next step slides in from the right), 'back' (from the left), 'open' (the camera zooms open).
+  function show(id, dir) {
+    var n = $(id); clearTimeout(n._leave);
+    var was = n.hidden || n.classList.contains('leaving');
+    n.classList.remove('leaving'); n.hidden = false;
+    if (!was) return;
+    n.classList.remove('fwd', 'back', 'open');
+    if (dir) n.classList.add(dir);
+    animateIn(n);
+  }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, reduceMotion ? 0 : ms); }); }
+  // Where a result's color spreads from: the button just tapped (Find guest, typed code), else the scan frame.
+  var lastTap = null;
+  document.addEventListener('pointerdown', function (e) { lastTap = { x: e.clientX, y: e.clientY, t: Date.now() }; }, true);
+  function floodOrigin(method) {
+    if ((method === 'search' || method === 'manual') && lastTap && Date.now() - lastTap.t < 4000) return lastTap;
+    var f = $('frame');
+    if (f && !f.hidden && !$('scan').hidden) { var r = f.getBoundingClientRect(); if (r.width) return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }
+    return { x: window.innerWidth / 2, y: window.innerHeight * 0.45 };
+  }
+  // Check and cross are drawn as strokes, so they can draw themselves in.
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var GLYPH_PATHS = { admitted: 'M5.6 12.8l4.1 4.1L18.6 7.6', void: 'M7.4 7.4l9.2 9.2M16.6 7.4l-9.2 9.2' };
+  function glyphSvg(d) {
+    var svg = document.createElementNS(SVG_NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    var path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('pathLength', '1');
+    svg.appendChild(path);
+    return svg;
+  }
   // Animated exit, then hidden.
   function leave(id, ms) {
     var n = $(id);
@@ -215,6 +247,7 @@
       node.setAttribute('data-v', String(c.scanned));
       node.textContent = c.scanned.toLocaleString();
       if (c.scanned > before && before > 0 && !reduceMotion) play(node, 'tick');
+      else if (c.scanned < before && !reduceMotion) play(node, 'tick-down'); // an undo takes one back
       $('count-total').textContent = c.valid.toLocaleString();
       $('search-counts').textContent = c.scanned.toLocaleString() + ' / ' + c.valid.toLocaleString();
     }, 150);
@@ -337,7 +370,7 @@
     renderCounts();
     renderStatus();
     handling = false;
-    showResult(out, raw);
+    showResult(out, raw, method);
   }
 
   function voidReason(v) {
@@ -352,14 +385,19 @@
     return 'No longer valid';
   }
 
-  function showResult(out, raw) {
+  function showResult(out, raw, method) {
     var r = out.row;
     var res = out.result;
     var box = $('result');
     box.className = 'result ' + res;
     var glyph = res === 'not_found' && out.rechecking ? '10' : GLYPHS[res] || '';
-    $('r-glyph').textContent = glyph;
-    $('r-glyph').className = 'r-glyph' + (glyph.length > 1 ? ' small' : '');
+    var g = $('r-glyph');
+    g.textContent = '';
+    if (GLYPH_PATHS[res]) g.appendChild(glyphSvg(GLYPH_PATHS[res])); else g.textContent = glyph;
+    g.className = 'r-glyph' + (glyph.length > 1 ? ' small' : '');
+    var o = floodOrigin(method);
+    box.style.setProperty('--fx', Math.round(o.x) + 'px');
+    box.style.setProperty('--fy', Math.round(o.y) + 'px');
     $('r-verdict').innerHTML = WORDS[res] || '';
     $('r-offline').hidden = !out.offline;
 
@@ -417,12 +455,14 @@
 
   function renderLastAdmit() {
     var box = $('last-admit');
-    if (!lastAdmit || settings.test) { box.hidden = true; return; }
+    if (!lastAdmit || settings.test) { if (settings.test) hide('last-admit'); else leave('last-admit', 200); return; }
     var text = $('last-admit-text');
+    var wasShown = !gone('last-admit');
     text.textContent = '';
     text.appendChild(el('span', { class: 'la-name', text: lastAdmit.name }));
     text.appendChild(el('span', { class: 'la-meta', text: 'Admitted ' + fmtShort(lastAdmit.at) }));
-    box.hidden = false;
+    show('last-admit');
+    if (wasShown && !reduceMotion) play(text, 'swap');
   }
 
   function dismissResult() {
@@ -484,9 +524,9 @@
       renderLastAdmit();
       renderCounts();
       renderRecent();
-      toast('Undone. That ticket can be scanned again.');
+      toast('Undone. That ticket can be scanned again.', 'ok');
     } catch (e) {
-      toast(e.status ? e.message : 'Undo needs a connection.');
+      toast(e.status ? e.message : 'Undo needs a connection.', 'bad');
     }
   }
 
@@ -511,10 +551,12 @@
   }
 
   var toastTimer = null;
-  function toast(msg) {
+  function toast(msg, kind) {
     var t = document.querySelector('.toast');
     if (!t) { t = el('div', { class: 'toast' }); document.body.appendChild(t); }
     t.textContent = msg;
+    t.classList.toggle('ok', kind === 'ok');
+    t.classList.toggle('bad', kind === 'bad');
     t.classList.remove('leaving');
     t.hidden = false;
     play(t, 'enter');
@@ -645,6 +687,7 @@
     try {
       var info = await scanner.start();
       $('btn-torch').hidden = !info.torch;
+      $('video').classList.add('live');
     } catch (e) {
       msg.textContent = '';
       msg.appendChild(el('p', { text: cameraProblem(e) }));
@@ -679,9 +722,9 @@
     $('pin-sub').textContent = forEvent ? [forEvent.venue, fmtWhen(forEvent.startsAt)].filter(Boolean).join(' · ') || 'The promoter has it on the event page.' : 'The promoter has it on the event page.';
   }
 
-  async function showPin(message, forEvent) {
+  async function showPin(message, forEvent, dir) {
     ['scan', 'setup', 'pick'].forEach(hide);
-    show('pin');
+    show('pin', dir);
     targetEvent = forEvent || null;
     pinValue = '';
     setPinTitle(targetEvent);
@@ -715,7 +758,12 @@
       var res = await api('POST', '/api/door/unlock', { pin: pinValue });
       unlocked = res.events || [];
       if (targetEvent && unlocked.some(function (e) { return e.id === targetEvent.id; })) setupEventId = targetEvent.id;
-      showSetup();
+      var boxes = $('pin-boxes');
+      boxes.classList.add('ok');
+      if (navigator.vibrate) navigator.vibrate(18);
+      await wait(260);
+      boxes.classList.remove('ok');
+      showSetup('fwd');
     } catch (e) {
       if (e.status === 401 && pinValue.length < maxPinLen()) return; // a longer PIN may still be on its way
       wrongPin(e.status === 401 ? 'Wrong PIN' : e.status === 429 ? e.message : 'Could not reach the server. Check the connection.');
@@ -752,9 +800,9 @@
     ]);
   }
 
-  function showSetup() {
+  function showSetup(dir) {
     ['pin', 'pick'].forEach(hide);
-    show('setup');
+    show('setup', typeof dir === 'string' ? dir : 'fwd');
     $('setup-error').textContent = '';
     var list = unlocked.slice().sort(function (a, b) { return liveRank(a) - liveRank(b) || String(a.startsAt).localeCompare(String(b.startsAt)); });
     if (!list.some(function (e) { return e.id === setupEventId; })) {
@@ -778,14 +826,14 @@
 
   function showPick() {
     hide('setup');
-    show('pick');
+    show('pick', 'fwd');
     var list = $('pick-list');
     list.textContent = '';
     doorEventsList.forEach(function (e) {
       var open = unlocked.filter(function (u) { return u.id === e.id; })[0];
       list.appendChild(eventCard(open || e, e.id === setupEventId, function () {
-        if (open) { setupEventId = e.id; showSetup(); }
-        else showPin('', e);
+        if (open) { setupEventId = e.id; showSetup('back'); }
+        else showPin('', e, 'fwd');
       }));
     });
   }
@@ -805,7 +853,7 @@
       await startScanning();
     } catch (e) {
       var ev = doorEventsList.filter(function (x) { return x.id === setupEventId; })[0];
-      if (e.status === 401 && ev) showPin('That PIN doesn’t open this event.', ev);
+      if (e.status === 401 && ev) showPin('That PIN doesn’t open this event.', ev, 'back');
       else $('setup-error').textContent = e.message || 'Could not sign in';
     } finally {
       $('start-btn').disabled = false;
@@ -814,7 +862,7 @@
 
   async function startScanning() {
     ['pin', 'setup', 'pick'].forEach(hide);
-    show('scan');
+    show('scan', 'open');
     lastAdmit = null;
     renderLastAdmit();
     $('menu-device').textContent = session.device.name;
@@ -847,12 +895,13 @@
     stopEverything();
     session = null;
     save('door.session', null);
-    showPin('This phone was signed out. Enter the PIN again.');
+    showPin('This phone was signed out. Enter the PIN again.', null, 'back');
   }
 
   function stopEverything() {
     clearInterval(syncTimer);
     if (scanner) scanner.stopCamera();
+    $('video').classList.remove('live');
     if (wakeLock) { try { wakeLock.release(); } catch (e) { /* ignore */ } wakeLock = null; }
     closePages(true);
     closeTest();
@@ -888,7 +937,7 @@
     session = null;
     save('door.session', null);
     tickets.clear(); byKey.clear(); outbox.clear(); recent = []; lastAdmit = null;
-    showPin('');
+    showPin('', null, 'back');
   }
 
   // ------------------------------------------------------------------ wire up
@@ -903,8 +952,8 @@
     });
     // 02 event and door
     $('start-btn').addEventListener('click', startFromSetup);
-    $('pick-another').addEventListener('click', showPick);
-    $('pick-close').addEventListener('click', showSetup);
+    $('pick-another').addEventListener('click', function () { showPick(); });
+    $('pick-close').addEventListener('click', function () { showSetup('back'); });
 
     $('result').addEventListener('click', dismissResult);
     $('r-done').addEventListener('click', function (e) { e.stopPropagation(); dismissResult(); });
@@ -926,7 +975,9 @@
     $('menu-close').addEventListener('click', function () { closePages(); });
     $('btn-camera').addEventListener('click', async function () {
       if (settings.nocamera || !scanner) return startCamera();
-      try { var info = await scanner.nextCamera(); if (info) $('btn-torch').hidden = !info.torch; else toast('Only one camera on this phone.'); } catch (e) { toast('Could not switch camera.'); }
+      $('video').classList.remove('live');
+      try { var info = await scanner.nextCamera(); if (info) $('btn-torch').hidden = !info.torch; else toast('Only one camera on this phone.'); } catch (e) { toast('Could not switch camera.', 'bad'); }
+      $('video').classList.add('live');
     });
     $('btn-torch').addEventListener('click', async function () {
       var on = await scanner.toggleTorch();

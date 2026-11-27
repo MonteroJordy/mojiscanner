@@ -44,14 +44,27 @@
       if (typeof body === 'string') { payload = body; headers['Content-Type'] = opts.contentType || 'text/plain; charset=utf-8'; }
       else { payload = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
     }
-    loading(1);
+    if (!opts.quiet) loading(1);
     var res;
     try { res = await fetch(path, { method: method, headers: headers, body: payload, credentials: 'same-origin', cache: 'no-store' }); }
-    finally { loading(-1); }
+    finally { if (!opts.quiet) loading(-1); }
     var data = await res.json().catch(function () { return {}; });
     if (res.status === 401 && !opts.allow401) { renderLogin(); throw new Error('Sign in again'); }
     if (!res.ok) { var err = new Error(data.error || 'HTTP ' + res.status); err.status = res.status; throw err; }
     return data;
+  }
+
+  // Pointing at an event (or pressing it) starts loading it, so the page is usually ready on click.
+  var prefetched = {};
+  function prefetch(path) {
+    var hit = prefetched[path];
+    if (hit && Date.now() - hit.at < 5000) return;
+    prefetched[path] = { at: Date.now(), p: api('GET', path, null, { allow401: true, quiet: true }).catch(function () { return null; }) };
+  }
+  function takePrefetch(path) {
+    var hit = prefetched[path];
+    delete prefetched[path];
+    return hit && Date.now() - hit.at < 8000 ? hit.p : null;
   }
 
   var inFlight = 0;
@@ -130,10 +143,13 @@
   }
 
   var toastTimer;
-  function toast(msg, ms) {
+  // kind: 'ok' (done), 'bad' (didn't work) or nothing (just so you know).
+  function toast(msg, ms, kind) {
     var t = document.querySelector('.toast');
     if (!t) { t = el('div', { class: 'toast', role: 'status', 'aria-live': 'polite' }); document.body.appendChild(t); }
     t.textContent = msg;
+    t.classList.toggle('ok', kind === 'ok');
+    t.classList.toggle('bad', kind === 'bad');
     t.classList.remove('leaving');
     t.hidden = false;
     play(t, 'enter');
@@ -141,7 +157,7 @@
     toastTimer = setTimeout(function () {
       t.classList.add('leaving');
       toastTimer = later(200, function () { t.hidden = true; t.classList.remove('leaving'); });
-    }, ms || 4000);
+    }, ms || (kind === 'bad' ? 6000 : 4000));
   }
 
   // Only the top pop-up takes clicks and Tab: the page and any pop-up under it are inert until it closes.
@@ -218,7 +234,7 @@
     var input = el('input', { value: value, readonly: true });
     return el('div', { class: 'copy-field' }, [input, el('button', { type: 'button', class: 'sm', text: 'Copy', onclick: function () {
       input.select();
-      (navigator.clipboard ? navigator.clipboard.writeText(value) : Promise.reject()).then(function () { toast('Copied'); }, function () { document.execCommand('copy'); toast('Copied'); });
+      (navigator.clipboard ? navigator.clipboard.writeText(value) : Promise.reject()).then(function () { toast('Copied', 0, 'ok'); }, function () { document.execCommand('copy'); toast('Copied', 0, 'ok'); });
     } })]);
   }
 
@@ -295,6 +311,18 @@
     renderEvents();
   }
   window.addEventListener('hashchange', route);
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || !view || !view.root.isConnected) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if (document.querySelector('.modal-back:not(.leaving)')) return;
+    e.preventDefault();
+    if (view.tab !== 'guests') location.hash = tabHref(view.id, 'guests');
+    (function focusSearch(tries) {
+      var q = view && view.content.querySelector('.toolbar-row .search');
+      if (q) q.focus(); else if (tries < 30) requestAnimationFrame(function () { focusSearch(tries + 1); });
+    })(0);
+  });
 
   // ------------------------------------------------------------------ login
 
@@ -304,20 +332,29 @@
     root.textContent = '';
     var pw = el('input', { type: 'password', autocomplete: 'current-password', required: true });
     var err = el('p', { class: 'error', role: 'alert' });
-    root.appendChild(el('div', { class: 'admin-login' }, [el('form', { onsubmit: async function (e) {
+    var form = el('form', { onsubmit: async function (e) {
       e.preventDefault();
       err.textContent = '';
+      var go = form.querySelector('button[type=submit]');
+      busy(go, true, 'Signing in…');
       try {
         await api('POST', '/api/admin/login', { password: pw.value }, { allow401: true });
+        pageChange = true; // the Events page slides in after signing in
         route();
-      } catch (ex) { err.textContent = ex.message; }
+      } catch (ex) {
+        busy(go, false);
+        err.textContent = ex.message;
+        play(form, 'shake');
+        pw.select();
+      }
     } }, [
       el('div', { class: 'brandline' }, [el('img', { class: 'logo', src: '/brand/moji-logo.png', alt: 'Moji' }), el('span', { class: 'sep' }), el('span', { class: 'label', text: 'Door admin' })]),
       el('h1', { text: 'Sign in' }),
       field('Admin password', pw),
       el('button', { class: 'primary lg', type: 'submit', text: 'Sign in' }),
       err,
-    ])]));
+    ]);
+    root.appendChild(el('div', { class: 'admin-login' }, [form]));
     pw.focus();
   }
 
@@ -382,7 +419,8 @@
       lastGroup = group;
       var hasTickets = e.valid || e.scanned;
       var bare = !hasTickets && !(e.platforms && e.platforms.length); // phones show "No sources yet" once, not twice
-      rows.push(el('a', { class: 'ev-row' + (st[2] === 0 ? ' live' : '') + (st[2] >= 3 ? ' past' : '') + (bare ? ' bare' : ''), href: '#/event/' + e.id }, [
+      var warm = function () { prefetch('/api/admin/events/' + e.id); };
+      rows.push(el('a', { class: 'ev-row' + (st[2] === 0 ? ' live' : '') + (st[2] >= 3 ? ' past' : '') + (bare ? ' bare' : ''), href: '#/event/' + e.id, onpointerenter: warm, onpointerdown: warm, onfocus: warm }, [
         el('div', { class: 'ev-name' }, [el('strong', { text: e.name }), el('span', { class: 'sub', text: e.venue || 'No venue set' })]),
         el('div', { class: 'ev-when' }, [el('span', { text: e.startsAt ? fmtDate(e.startsAt) : 'No date' }), e.startsAt ? el('span', { class: 'sub', text: fmtDoors(e.startsAt) }) : null]),
         el('div', { class: 'ev-status' }, [el('span', { class: 'tag ' + st[0], text: st[1] })]),
@@ -456,7 +494,8 @@
 
   async function renderEvent(id, tab) {
     var data;
-    try { data = await api('GET', '/api/admin/events/' + id); } catch (e) { if (e.status === 404) location.hash = ''; return; }
+    var pre = takePrefetch('/api/admin/events/' + id);
+    try { data = (pre && await pre) || await api('GET', '/api/admin/events/' + id); } catch (e) { if (e.status === 404) location.hash = ''; return; }
     var main = shell(1);
     var head = el('div', { class: 'page-head ev-top' });
     var mark = el('div', { class: 'tabs-mark', 'aria-hidden': 'true' });
@@ -464,6 +503,16 @@
     var ink = el('span', { class: 'ink', 'aria-hidden': 'true' });
     EVENT_TABS.forEach(function (t) { bar.appendChild(el('a', { href: tabHref(id, t[0]), 'data-tab': t[0], text: t[1] })); });
     bar.appendChild(ink);
+    bar.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      var links = Array.prototype.slice.call(bar.querySelectorAll('a[data-tab]'));
+      var i = links.indexOf(document.activeElement);
+      if (i === -1) return;
+      e.preventDefault();
+      var next = links[(i + (e.key === 'ArrowRight' ? 1 : links.length - 1)) % links.length];
+      next.focus();
+      next.click();
+    });
     var content = el('div', { class: 'tab-body' });
     [head, mark, bar, content].forEach(function (x) { main.appendChild(x); });
     view = { id: id, data: data, tab: null, root: main, head: head, mark: mark, bar: bar, ink: ink, content: content, prev: null, filter: '' };
@@ -482,7 +531,7 @@
     v.head.appendChild(el('div', { class: 'ph-bar' }, [
       el('nav', { class: 'crumb', 'aria-label': 'Breadcrumb' }, [el('a', { href: '#/', text: 'Events' })]),
       el('button', { type: 'button', class: 'sm', text: 'Edit event', onclick: function () {
-        var close = modal('Edit event', eventForm(ev, function () { close(); toast('Saved'); refreshEvent(true); }));
+        var close = modal('Edit event', eventForm(ev, function () { close(); toast('Saved', 0, 'ok'); refreshEvent(true); }));
       } }),
     ]));
     v.head.appendChild(el('h1', { text: ev.name }));
@@ -511,6 +560,7 @@
       var top = v.mark.getBoundingClientRect().top + window.scrollY - (parseFloat(getComputedStyle(v.bar).top) || 0);
       if (window.scrollY > top) window.scrollTo(0, top);
     }
+    v.live = null;
     v.content.textContent = '';
     v.content.className = 'tab-body' + (first || reduceMotion ? '' : ' ' + dir);
     ({ overview: renderOverview, guests: guestsTab, scans: scansTab, door: doorTab })[tab](v.content, v.data, { fresh: true });
@@ -544,6 +594,7 @@
     drawHead();
     if (v.tab === 'overview') renderOverview(v.content, fresh, { fresh: false });
     else if (force) ({ guests: guestsTab, scans: scansTab, door: doorTab })[v.tab](v.content, fresh, { fresh: false });
+    else if (v.live) v.live(fresh);
   }
 
   // "Headline\ndetail" (new) or "message — hint" (older) into [headline, detail].
@@ -565,7 +616,7 @@
     var over = !isNaN(start) && Date.now() > start + 10 * 3600e3;
     var out = [];
     if (!over && !ev.archived && weakPin(ev.doorPin)) {
-      out.push({ text: 'Door PIN ' + ev.doorPin + ' is easy to guess. Anyone with the door link could try it.', action: ['Change PIN', function () { changePin(ev); }] });
+      out.push({ key: 'pin', text: 'Door PIN ' + ev.doorPin + ' is easy to guess. Anyone with the door link could try it.', action: ['Change PIN', function () { changePin(ev); }] });
     }
     data.sources.forEach(function (s) {
       var upload = '#/event/' + ev.id + '/upload/' + s.id;
@@ -641,7 +692,7 @@
         el('ul', null, issues.map(function (it) {
           var a = it.action;
           var btn = typeof a[1] === 'string' ? el('a', { class: 'btn sm', href: a[1], text: a[0] }) : el('button', { type: 'button', class: 'sm', text: a[0], onclick: a[1] });
-          return el('li', null, [it.s ? el('span', { class: 'badge', text: it.s.platformName }) : el('span', { class: 'tag warn', text: 'Check' }), el('span', { class: 'att-text', text: it.text }), btn]);
+          return el('li', { 'data-key': it.key || null }, [it.s ? el('span', { class: 'badge', text: it.s.platformName }) : el('span', { class: 'tag warn', text: 'Check' }), el('span', { class: 'att-text', text: it.text }), btn]);
         })),
       ]));
     }
@@ -660,7 +711,10 @@
     var list = el('div', { class: 'src-list' }, data.sources.map(function (s) { return sourceRow(ev, s, byId[s.id] || { valid: 0, scanned: 0, void: 0 }); }));
     box.appendChild(list);
     if (fresh && !(view && view.prevSrc)) stagger(list.children);
-    if (view) { view.prevSrc = {}; data.sources.forEach(function (s) { view.prevSrc[s.id] = pctOf(byId[s.id]); }); }
+    if (view) {
+      view.prevSrc = {}; view.prevNums = {};
+      data.sources.forEach(function (s) { var c = byId[s.id] || { valid: 0, scanned: 0, void: 0 }; view.prevSrc[s.id] = pctOf(c); view.prevNums[s.id] = { valid: c.valid, scanned: c.scanned, void: c.void }; });
+    }
   }
 
   // The custom label without a repeated platform name ("Shotgun · Riva Starr @ Sable" → "Riva Starr @ Sable").
@@ -699,11 +753,18 @@
   }
 
   function pctOf(c) { return c && c.valid ? Math.min(100, Math.round(100 * c.scanned / c.valid)) : 0; }
-  function srcNums(counts, cls, fromPct) {
+  // from: the counts on screen before a refresh; the numbers glide from them to the new ones.
+  function srcNums(counts, cls, fromPct, from) {
+    function num(v, was) {
+      var start = was === undefined || was === null ? v : was;
+      var b = el('b', { text: n(start), 'data-v': String(start) });
+      if (start !== v) countTo(b, v, 650);
+      return b;
+    }
     return el('span', { class: 'src-nums' + (cls ? ' ' + cls : '') }, [
-      el('span', null, [el('b', { text: n(counts.valid) }), ' valid']),
-      el('span', null, [el('b', { text: n(counts.scanned) }), ' in']),
-      el('span', { class: counts.void ? '' : 'zero' }, [el('b', { text: n(counts.void) }), ' void']),
+      el('span', null, [num(counts.valid, from && from.valid), ' valid']),
+      el('span', null, [num(counts.scanned, from && from.scanned), ' in']),
+      el('span', { class: counts.void ? '' : 'zero' }, [num(counts.void, from && from.void), ' void']),
       meter(counts.scanned, counts.valid, null, fromPct),
     ]);
   }
@@ -719,7 +780,7 @@
         el('span', { class: 'src-title' }, [el('span', { class: 'badge', text: s.platformName }), el('strong', { text: label || HOW[s.kind] })]),
         el('span', { class: 'src-state' }, [el('span', { class: 'dot ' + state[0] }), el('span', { text: (label ? HOW_SHORT[s.kind] + ' · ' : '') + state[1] })]),
       ]),
-      srcNums(counts, null, view && view.prevSrc ? view.prevSrc[s.id] : 0), // a refresh doesn't restart the bar
+      srcNums(counts, null, view && view.prevSrc ? view.prevSrc[s.id] : 0, view && view.prevNums ? view.prevNums[s.id] : null), // a refresh glides, it doesn't restart
       el('span', { class: 'chev', 'aria-hidden': 'true', text: '›' }),
     ]);
     return el('div', { class: 'src-row' + (failed ? ' failed' : '') }, [open, el('div', { class: 'src-actions' }, [primaryAction(ev, s)])]);
@@ -758,7 +819,7 @@
         if (!(await ask('Remove ' + s.platformName + (label ? ' · ' + label : '') + '?', what + ' The scan log keeps every check-in.', 'Remove', true))) return;
         await api('DELETE', '/api/admin/sources/' + s.id);
         close();
-        toast(s.platformName + ' removed');
+        toast(s.platformName + ' removed', 0, 'ok');
         refreshEvent(true);
       } }),
     ]));
@@ -768,8 +829,8 @@
     busy(btn, true, 'Syncing…');
     try {
       var res = await api('POST', '/api/admin/sources/' + s.id + '/sync', opts);
-      toast(res.ok ? s.platformName + ': ' + res.message : s.platformName + ' sync failed. ' + splitMsg(res.message)[0], 6000);
-    } catch (e) { toast(e.message, 6000); }
+      toast(res.ok ? s.platformName + ': ' + res.message : s.platformName + ' sync failed. ' + splitMsg(res.message)[0], 6000, res.ok ? 'ok' : 'bad');
+    } catch (e) { toast(e.message, 6000, 'bad'); }
     busy(btn, false);
     if (view) await refreshEvent(true); else route();
   }
@@ -938,7 +999,7 @@
         if (existing) {
           await api('PATCH', '/api/admin/sources/' + existing.id, { label: label.value, config: config });
           if (close) close();
-          toast('Saved');
+          toast('Saved', 0, 'ok');
           if (view) refreshEvent(true); else route();
           return;
         }
@@ -1217,10 +1278,16 @@
     var q = el('input', { class: 'search', type: 'search', placeholder: 'Search name, email or ticket code', 'aria-label': 'Search tickets' });
     var status = (view && view.filter) || '';
     if (view) view.filter = '';
-    var segs = [['', 'All', rows.all], ['scanned', 'In', rows.scanned], ['unscanned', 'Not here', rows.unscanned], ['void', 'Void', rows.void]];
-    if (rows.flagged) segs.push(['flagged', 'Flagged', rows.flagged]);
+    var segs = segsFrom(rows);
+    function segsFrom(r) {
+      var out = [['', 'All', r.all], ['scanned', 'In', r.scanned], ['unscanned', 'Not here', r.unscanned], ['void', 'Void', r.void]];
+      if (r.flagged || status === 'flagged') out.push(['flagged', 'Flagged', r.flagged || 0]);
+      return out;
+    }
     var seg = el('div', { class: 'seg', role: 'group', 'aria-label': 'Filter' });
     var changed = null; // a row that just got admitted or undone flashes once
+    var shown = {};     // ticket id -> what its row showed, so a live refresh only flashes rows that changed
+    var seq = 0;        // only the newest answer draws the list (typing fast, a refresh arriving late)
     function drawSeg() {
       seg.textContent = '';
       segs.forEach(function (sg) { seg.appendChild(el('button', { type: 'button', class: status === sg[0] ? 'on' : '', 'aria-pressed': status === sg[0] ? 'true' : 'false', text: sg[1] + ' ' + n(sg[2]), onclick: function () { status = sg[0]; drawSeg(); load(true); } })); });
@@ -1239,8 +1306,16 @@
     }
     var list = el('div', { class: 'table-wrap' });
     var timer;
-    async function load(animate) {
-      var res = await api('GET', '/api/admin/events/' + ev.id + '/tickets?limit=200&q=' + encodeURIComponent(q.value) + '&status=' + status);
+    async function load(animate, live) {
+      var mine = ++seq;
+      var res;
+      try { res = await api('GET', '/api/admin/events/' + ev.id + '/tickets?limit=200&q=' + encodeURIComponent(q.value) + '&status=' + status); } catch (e) { return; }
+      if (mine !== seq || !list.isConnected && live) return;
+      var now = {};
+      res.tickets.forEach(function (t) { now[t.id] = [t.status, t.scannedAt, t.flag].join('|'); });
+      if (live && JSON.stringify(now) === JSON.stringify(shown)) return; // nothing new at the door
+      var moved = live ? res.tickets.filter(function (t) { return shown[t.id] !== undefined && shown[t.id] !== now[t.id]; }).map(function (t) { return t.id; }) : [];
+      shown = now;
       list.textContent = '';
       if (!res.tickets.length) {
         var none = { scanned: 'Nobody is in yet.', unscanned: 'Everyone is in.', void: 'No void tickets.', flagged: 'Nothing flagged.' }[status];
@@ -1258,20 +1333,23 @@
             busy(e.currentTarget, true);
             try {
               var r = await api('POST', '/api/admin/events/' + ev.id + '/admit', { ticketId: t.id });
-              toast(r.result === 'admitted' ? (t.holderName || 'Guest') + ' admitted' : 'Not admitted: ' + r.result.replace(/_/g, ' '));
-            } catch (ex) { toast(ex.message); }
+              toast(r.result === 'admitted' ? (t.holderName || 'Guest') + ' admitted' : 'Not admitted: ' + r.result.replace(/_/g, ' '), 0, r.result === 'admitted' ? 'ok' : 'bad');
+            } catch (ex) { toast(ex.message, 0, 'bad'); }
             changed = t.id;
             load(false);
           } });
         } else if (t.scannedAt) {
-          action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', 'aria-label': 'Undo check-in for ' + (t.holderName || 'guest'), onclick: async function () {
-            await api('POST', '/api/admin/tickets/' + t.id + '/undo', {});
-            toast((t.holderName || 'Guest') + ' is no longer checked in');
+          action = el('button', { type: 'button', class: 'text-btn', text: 'Undo', 'aria-label': 'Undo check-in for ' + (t.holderName || 'guest'), onclick: async function (e) {
+            busy(e.currentTarget, true);
+            try {
+              await api('POST', '/api/admin/tickets/' + t.id + '/undo', {});
+              toast((t.holderName || 'Guest') + ' is no longer checked in');
+            } catch (ex) { toast(ex.message, 0, 'bad'); }
             changed = t.id;
             load(false);
           } });
         }
-        return el('tr', { class: changed === t.id ? 'flash' : '' }, [
+        return el('tr', { class: changed === t.id || moved.indexOf(t.id) !== -1 ? 'flash' : '' }, [
           el('td', { class: 'guest' }, [el('strong', { text: t.holderName || '(no name)' }), isMadeUp(t.code) ? el('span', { class: 'tag noqr', title: 'This list had no QR codes: check this guest in by name', text: 'no QR' }) : null, el('span', { class: 'sub show-sm', text: [t.ticketType, platformName(t.platform)].filter(Boolean).join(' · ') })]),
           el('td', { class: 'hide-sm', text: t.ticketType || '' }),
           el('td', { class: 'hide-sm' }, [el('span', { class: 'badge sm', text: platformName(t.platform) })]),
@@ -1289,6 +1367,17 @@
       if (res.tickets.length === 200) list.appendChild(el('p', { class: 'more-note', text: 'Showing the first 200. Narrow the search, or download the full list.' }));
     }
     q.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(function () { load(false); }, 250); });
+    // Every 10 s the event refresh brings new counts; the list follows unless someone is typing a search.
+    if (view) view.live = function (fresh) {
+      if (!list.isConnected) return;
+      var next = segsFrom(fresh.stats.rows || rows);
+      var sameChips = next.length === segs.length && next.every(function (sg, i) { return sg[0] === segs[i][0]; });
+      segs = next;
+      // Same chips: only their numbers change, so a tap or keyboard focus on a chip is never lost.
+      if (sameChips) Array.prototype.forEach.call(seg.children, function (b, i) { b.textContent = segs[i][1] + ' ' + n(segs[i][2]); });
+      else drawSeg();
+      if (document.activeElement !== q) load(false, true);
+    };
     drawSeg();
     box.appendChild(listHead(plural(rows.all, 'ticket', 'tickets') + ' from ' + plural(data.sources.length, 'source', 'sources'), '/api/admin/events/' + ev.id + '/export/tickets.csv', 'DICE ticket holders are left out of downloads (DICE’s token terms).'));
     box.appendChild(el('div', { class: 'toolbar-row' }, [q, seg]));
@@ -1303,10 +1392,25 @@
     try { res = await api('GET', '/api/admin/events/' + ev.id + '/scans?limit=300'); } catch (e) { return; }
     if (!view || view.tab !== 'scans' || !box.isConnected) return;
     box.textContent = '';
+    var lastId = res.scans.length ? res.scans[0].id : 0;
+    // New scans come in at the top while this tab is open (the event refresh asks every 10 s).
+    view.live = async function () {
+      var more;
+      try { more = await api('GET', '/api/admin/events/' + ev.id + '/scans?limit=50'); } catch (e) { return; }
+      var fresh = (more.scans || []).filter(function (s) { return s.id > lastId; });
+      if (!fresh.length || !box.isConnected) return;
+      if (!lastId) { scansTab(box, data, { fresh: true }); return; } // the first scan of the night replaces the empty note
+      lastId = fresh[0].id;
+      var tb = box.querySelector('table.scans tbody');
+      if (!tb) return;
+      fresh.slice().reverse().forEach(function (s) { var tr = row(s); tr.classList.add('arrive'); tb.insertBefore(tr, tb.firstChild); });
+      while (tb.children.length > 300) tb.removeChild(tb.lastChild);
+    };
     if (!res.scans.length) { box.appendChild(el('p', { class: 'muted empty-line', text: 'No scans yet. Every scan from every door phone shows up here, newest first.' })); return; }
     var labels = { admitted: ['ok', 'Admitted'], duplicate: ['dup', 'Already scanned'], void: ['void', 'Not valid'], not_found: ['warn', 'Not found'], undo: ['muted', 'Undone'] };
     box.appendChild(listHead('Every scan from every door phone, newest first', '/api/admin/events/' + ev.id + '/export/scans.csv'));
-    var tbody = el('tbody', null, res.scans.map(function (s) {
+    var tbody = el('tbody', null, res.scans.map(row));
+    function row(s) {
       var l = labels[s.result] || ['muted', s.result];
       return el('tr', null, [
         el('td', { class: 'num t' }, [fmtClock(s.scanned_at)]),
@@ -1315,7 +1419,7 @@
         el('td', { class: 'door', text: s.device_name || '' }),
         el('td', { class: 'muted hide-sm hide-md', text: ({ camera: 'Camera', manual: 'Typed', search: 'Search', scanner: 'Handheld scanner' }[s.method] || s.method) + (s.offline ? ' · offline' : '') }),
       ]);
-    }));
+    }
     box.appendChild(el('div', { class: 'table-wrap' }, [el('table', { class: 'data scans' }, [
       el('thead', null, [el('tr', null, [['Time'], ['Result'], ['Guest'], ['Door'], ['How', 'hide-sm hide-md']].map(function (h) { return el('th', { class: h[1], text: h[0] }); }))]),
       tbody,
@@ -1339,7 +1443,7 @@
       el('div', { class: 'door-card-actions' }, [
         el('button', { type: 'button', class: weak ? 'primary' : '', text: 'Change PIN', onclick: function () { changePin(ev); } }),
         el('a', { class: 'btn', href: '/', target: '_blank', rel: 'noopener', text: 'Open door app' }),
-        el('button', { type: 'button', text: 'Copy door link', onclick: function () { copyText(location.origin + '/', 'Door link copied'); } }),
+        el('button', { type: 'button', text: 'Send to staff', title: 'Sends the door link and PIN', onclick: function () { shareDoor(ev); } }),
       ]),
     ]));
 
@@ -1350,7 +1454,7 @@
       signedIn.length ? el('button', { type: 'button', class: 'sm danger', text: 'Sign out all', onclick: async function () {
         if (!(await ask('Sign out all door phones?', 'Every phone scanning ' + ev.name + ' goes back to the PIN screen. Check-ins already made stay.', 'Sign out phones', true))) return;
         var r = await api('POST', '/api/admin/events/' + ev.id + '/signout-devices', {});
-        toast(r.signedOut ? plural(r.signedOut, 'phone', 'phones') + ' signed out' : 'No phones were signed in');
+        toast(r.signedOut ? plural(r.signedOut, 'phone', 'phones') + ' signed out' : 'No phones were signed in', 0, r.signedOut ? 'ok' : '');
         refreshEvent(true);
       } }) : null,
     ]));
@@ -1371,7 +1475,7 @@
             el('td', { class: 'r' }, [d.revoked ? null : el('button', { type: 'button', class: 'xs danger', text: 'Sign out', 'aria-label': 'Sign out ' + d.name, onclick: async function () {
               if (!(await ask('Sign out ' + d.name + '?', 'That phone goes back to the PIN screen. Staff type the PIN to get back in, and scans saved on it upload then.', 'Sign out', true))) return;
               await api('POST', '/api/admin/devices/' + d.id + '/revoke', {});
-              toast(d.name + ' signed out');
+              toast(d.name + ' signed out', 0, 'ok');
               refreshEvent(true);
             } })]),
           ]);
@@ -1396,20 +1500,43 @@
       try {
         await api('PATCH', '/api/admin/events/' + ev.id, { doorPin: input.value });
         close();
-        toast('Door PIN changed. Tell door staff the new one.');
-        refreshEvent(true);
+        toast('Door PIN changed. Send it to your door staff.', 0, 'ok');
+        resolveIssue('pin', function () { refreshEvent(true); });
       } catch (ex) { err.textContent = ex.message; busy(save, false); }
     } }, [field('New door PIN', input, 'Phones already scanning stay signed in.'), hint, el('div', { class: 'head-actions' }, [save]), err]), null, { small: true });
     later(260, function () { input.focus(); });
   }
 
+  // A fixed item folds away (or the whole box, if it was the last one), then the page refreshes.
+  function resolveIssue(key, then) {
+    var li = document.querySelector('.attention li[data-key="' + key + '"]');
+    if (!li || reduceMotion) { then(); return; }
+    var box = li.closest('.attention');
+    var node = box && box.querySelectorAll('li').length === 1 ? box : li;
+    node.style.setProperty('height', node.offsetHeight + 'px');
+    node.classList.add('resolving');
+    requestAnimationFrame(function () { requestAnimationFrame(function () { node.style.setProperty('height', '0px'); }); });
+    later(320, then);
+  }
+
+  // Door link and PIN in one message, through the phone's share sheet (or copied, on a laptop).
+  function shareDoor(ev) {
+    var link = location.origin + '/';
+    var text = 'Door app for ' + ev.name + ': ' + link + (ev.doorPin ? '\nDoor PIN: ' + ev.doorPin : '');
+    if (navigator.share) {
+      navigator.share({ title: 'Door app · ' + ev.name, text: text }).catch(function () { /* closed the share sheet */ });
+      return;
+    }
+    copyText(text, 'Copied the door link and PIN. Paste it to your door staff.');
+  }
+
   function copyText(text, done) {
     function fallback() {
       var t = el('textarea', { class: 'offscreen' }); t.value = text; document.body.appendChild(t); t.select();
-      try { document.execCommand('copy'); toast(done); } catch (e) { toast(text); }
+      try { document.execCommand('copy'); toast(done, 0, 'ok'); } catch (e) { toast(text); }
       t.remove();
     }
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast(done); }, fallback);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast(done, 0, 'ok'); }, fallback);
     else fallback();
   }
 
@@ -1429,7 +1556,7 @@
       if (!input.value.trim()) { input.focus(); return; }
       busy(go, true);
       var res;
-      try { res = await api('POST', '/api/admin/events/' + ev.id + '/lookup', { code: input.value }); } catch (ex) { busy(go, false); toast(ex.message); return; }
+      try { res = await api('POST', '/api/admin/events/' + ev.id + '/lookup', { code: input.value }); } catch (ex) { busy(go, false); toast(ex.message, 0, 'bad'); return; }
       busy(go, false);
       out.textContent = '';
       if (!res.tickets.length) {
