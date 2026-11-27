@@ -25,7 +25,7 @@
       <div class="pin-a">
         <img class="logo pin-logo" src="/brand/moji-logo.png" alt="Moji">
         <h1 class="d-title" id="pin-title">Enter tonight’s<br>door PIN</h1>
-        <p class="d-sub" id="pin-sub">The promoter has it on the event page.</p>
+        <p class="d-sub" id="pin-sub">The promoter sends it with the door link.</p>
         <div class="pin-boxes" id="pin-boxes" aria-hidden="true"></div>
         <p class="d-error" id="pin-error" role="alert" aria-live="assertive"></p>
       </div>
@@ -34,7 +34,7 @@
         <button type="button" data-key="1">1</button><button type="button" data-key="2">2</button><button type="button" data-key="3">3</button>
         <button type="button" data-key="4">4</button><button type="button" data-key="5">5</button><button type="button" data-key="6">6</button>
         <button type="button" data-key="7">7</button><button type="button" data-key="8">8</button><button type="button" data-key="9">9</button>
-        <span class="key-gap"></span><button type="button" data-key="0">0</button><button type="button" data-key="back" class="key-back" aria-label="Delete">⌫</button>
+        <span class="key-gap"></span><button type="button" data-key="0">0</button><button type="button" data-key="back" class="key-back" aria-label="Delete"><svg class="ico key-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 5.5H9.2L3 12l6.2 6.5H21a1 1 0 0 0 1-1v-11a1 1 0 0 0-1-1z"/><path d="M17.5 9.5l-5 5M12.5 9.5l5 5"/></svg></button>
       </div>
     </div>
   </section>
@@ -61,7 +61,7 @@
 
   <!-- Pick another event -->
   <section id="pick" class="door-screen page" hidden>
-    <div class="page-top"><button type="button" class="back" id="pick-close">← Back</button></div>
+    <div class="page-top"><button type="button" class="back" id="pick-close"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12h-15M10.5 5.5 4 12l6.5 6.5"/></svg>Back</button></div>
     <div class="page-body">
       <div class="d-col pick-col">
         <h1 class="d-title">Pick the event</h1>
@@ -135,10 +135,10 @@
 
   <!-- 10 Find guest: names, emails and typed codes -->
   <section id="search" class="door-screen page" hidden>
-    <div class="page-top"><button type="button" class="back" id="search-close">← Scan</button><span class="d-label bright" id="search-counts"></span></div>
+    <div class="page-top"><button type="button" class="back" id="search-close"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12h-15M10.5 5.5 4 12l6.5 6.5"/></svg>Scan</button><span class="d-label bright" id="search-counts"></span></div>
     <form class="searchbox" id="search-form" autocomplete="off">
       <input id="search-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="Find guest by name, email or ticket code">
-      <button type="button" class="clear" id="search-clear" aria-label="Clear search">✕</button>
+      <button type="button" class="clear" id="search-clear" aria-label="Clear search"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
     </form>
     <p class="search-hint">Name, email or the code under the QR</p>
     <div class="count-line" id="count-line"><span class="d-label" id="search-count"></span><span class="d-label" id="search-order" hidden>Not in yet first</span></div>
@@ -150,9 +150,10 @@
 
   <!-- 11 More -->
   <section id="menu" class="door-screen page" hidden>
-    <div class="page-top"><button type="button" class="back" id="menu-close">← Scan</button><span class="d-label bright" id="menu-device"></span></div>
+    <div class="page-top"><button type="button" class="back" id="menu-close"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12h-15M10.5 5.5 4 12l6.5 6.5"/></svg>Scan</button><span class="d-label bright" id="menu-device"></span></div>
     <div class="page-body">
       <div class="d-col more-col">
+        <div class="more-event"><div class="nm" id="menu-event"></div><div class="wh" id="menu-event-sub"></div></div>
         <div class="sync-card">
           <div class="grow"><div class="t" id="sync-title">Not synced yet</div><div class="s" id="data-status"></div></div>
           <button type="button" class="primary" id="btn-sync-now">Sync now</button>
