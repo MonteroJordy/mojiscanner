@@ -205,10 +205,33 @@ function status({ db, syncer, config, crypto, bootedAt, now = Date.now() }) {
         add('warn', scope, 'No door phones signed in', null, 'Door tab → Send to staff. Each phone opens the link once with signal, types the PIN and picks its door.', href + '/door');
       }
       if (when === 'doors') {
-        seen.filter((dv) => dv.ms >= 3 * MIN && dv.ms < 6 * HOUR).forEach((dv) => {
-          add('warn', scope, dv.name + ' last reached the server ' + ago(dv.ms), 'It keeps scanning offline and catches up when it\'s back.', 'Check that phone has signal and the door app is open. If it was put away on purpose, ignore this.', href + '/door');
-        });
+        // A phone only reports while the door app is open on screen, so a phone locked between guests goes
+        // quiet with nothing wrong. That's worth knowing, never an alert. The alert below is for real trouble.
+        const quiet = seen.filter((dv) => dv.ms >= 3 * MIN && dv.ms < 6 * HOUR);
+        if (quiet.length) {
+          add('info', scope,
+            (quiet.length === 1 ? '1 signed-in phone is' : quiet.length + ' signed-in phones are') + ' quiet',
+            'Last reached the server: ' + quiet.map((dv) => dv.name + ' ' + ago(dv.ms)).join(', ') + '. '
+              + (active.length ? (active.length === 1 ? '1 phone is' : active.length + ' phones are') + ' online now. ' : '')
+              + 'A phone only reports while the door app is open on screen, so a locked phone goes quiet. If a door loses internet, its scans arrive late and this page says so.',
+            'Nothing to do unless a door says it has no internet. A phone that typed the PIN again leaves its old entry behind: sign that entry out in the Door tab.',
+            href + '/door');
+        }
       }
+    }
+
+    // Scans that reached the server late: that door was scanning without internet, so it can't see new orders.
+    if (when !== 'after') {
+      const late = db.all(
+        `SELECT device_name AS name, COUNT(*) AS n, MAX((julianday(received_at) - julianday(scanned_at)) * 1440) AS maxMin
+           FROM scans WHERE event_id = ? AND offline = 1 AND received_at >= ? GROUP BY device_name`,
+        e.id, new Date(now - 30 * MIN).toISOString());
+      late.filter((r) => r.maxMin >= 2).forEach((r) => {
+        add('warn', scope, (r.name || 'A door phone') + ' scanned ' + r.n + (r.n === 1 ? ' guest' : ' guests') + ' without internet',
+          'Those scans reached the server up to ' + Math.round(r.maxMin) + ' min late. While a phone is offline it can\'t see new orders, so a new buyer shows Not found.',
+          'Check that door\'s signal or Wi-Fi. A guest who shows Not found with OFFLINE on the screen: find them in the admin\'s Guests tab and tap Admit.',
+          href + '/scans');
+      });
     }
 
     const flags = st.flags || {};
